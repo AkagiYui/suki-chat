@@ -4,7 +4,7 @@
 编辑完成使用 `get_errors` 工具检查，确保没有错误。
 
 编写前端 Tailwind CSS 样式时，应当将任意值写法简化为标准的工具类，如 `w-[200px]` 写为 `w-50` 。
-修改前端后，需要使用命令 `eslint.executeAutofix` 来自动修复代码格式，然后使用 `yarn run build` 进行构建测试(在 `client` 目录执行)。
+修改前端后，需要使用命令 `eslint.executeAutofix` 来自动修复代码格式，然后使用 `pnpm run build` 进行构建测试(在 `frontend` 目录执行)。
 
 
 后端测试构建的时候用 `go build -o /dev/null ./cmd/server/. 2>&1`，避免生成二进制文件。
