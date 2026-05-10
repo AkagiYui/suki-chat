@@ -1,0 +1,38 @@
+# Git
+.git
+.gitignore
+.gitattributes
+
+# IDE
+.idea
+.vscode
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Docker
+.dockerignore
+
+# Go
+/tmp
+
+# Node
+client/node_modules
+client/.yarn
+
+# Build output
+client/dist
+
+# Config (use env vars in production)
+*.example.yaml
+*.example.yml
+
+# CI
+.github
+
+# Docs
+*.md
+LICENSE

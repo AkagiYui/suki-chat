@@ -1,0 +1,18 @@
+# suki-chat - Caddy configuration
+# Serves frontend static files and proxies API requests to Go backend
+
+:80 {
+    encode gzip
+
+    # API 请求直接转发到 Go 后端（handle 块按书写顺序匹配，不受全局指令顺序影响）
+    handle /api/* {
+        reverse_proxy localhost:8182
+    }
+
+    # 静态文件 + SPA fallback（仅处理非 API 路径）
+    handle {
+        root * /usr/share/caddy
+        try_files {path} /index.html
+        file_server
+    }
+}
