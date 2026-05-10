@@ -13,10 +13,10 @@
 
 # ---- Stage 1: 构建前端 ----
 FROM node:lts-alpine AS frontend-builder
-WORKDIR /app/client
-COPY client/package.json ./
+WORKDIR /app/frontend
+COPY frontend/package.json ./
 RUN corepack enable && pnpm install --frozen-lockfile
-COPY client/ .
+COPY frontend/ .
 RUN corepack enable && pnpm build
 
 # ---- Stage 2: 构建 Go 后端 ----
@@ -42,7 +42,7 @@ RUN apk add --no-cache \
     bash
 
 # 复制构建产物
-COPY --from=frontend-builder /app/client/dist /usr/share/caddy
+COPY --from=frontend-builder /app/frontend/dist /usr/share/caddy
 COPY --from=backend-builder /app/server /usr/local/bin/server
 COPY Caddyfile /etc/caddy/Caddyfile
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
@@ -63,7 +63,7 @@ RUN apk add --no-cache \
     bash
 
 # 复制构建产物
-COPY --from=frontend-builder /app/client/dist /usr/share/caddy
+COPY --from=frontend-builder /app/frontend/dist /usr/share/caddy
 COPY --from=backend-builder /app/server /usr/local/bin/server
 COPY Caddyfile /etc/caddy/Caddyfile
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
