@@ -6,9 +6,9 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "tsc -b && vite build",
+    "build": "vite build",
     "preview": "vite preview",
-    "lint": "eslint --fix --ext ."
+    "lint": "eslint --fix --ext . && tsc -b"
   },
   "dependencies": {
     "@iconify-icon/solid": "^3.0.3",
