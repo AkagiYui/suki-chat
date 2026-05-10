@@ -75,7 +75,7 @@ export default [
       parser: tseslint.parser,
       parserOptions: {
         projectService: {
-          allowDefaultProject: ["*.config.js", "*.mjs"],
+          allowDefaultProject: ["eslint.config.ts", "*.mjs"],
         },
         sourceType: "module",
         ecmaVersion: "latest",
