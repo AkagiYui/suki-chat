@@ -14,7 +14,7 @@
 # ---- Stage 1: 构建前端 ----
 FROM node:lts-alpine AS frontend-builder
 WORKDIR /app/frontend
-COPY frontend/package.json ./
+COPY frontend/package.json pnpm-lock.yaml ./
 RUN corepack enable && pnpm install --frozen-lockfile
 COPY frontend/ .
 RUN corepack enable && pnpm build
