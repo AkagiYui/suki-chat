@@ -35,6 +35,8 @@ jobs:
 
       - name: Set up pnpm
         uses: pnpm/action-setup@v4
+        with:
+          version: 10.33.1 # package.json 在 frontend/ 而非仓库根，需显式指定版本
 
       - name: Set up Node
         uses: actions/setup-node@v4
@@ -47,13 +49,19 @@ jobs:
         working-directory: frontend
         run: pnpm install --frozen-lockfile
 
+      - name: Build frontend
+        # 必须先 build：tanstackRouter 插件在构建时生成 routeTree.gen.ts（被 gitignore），
+        # 后续 tsc 类型检查依赖它。
+        working-directory: frontend
+        run: pnpm build
+
       - name: Lint frontend
         working-directory: frontend
         run: pnpm exec eslint .
 
-      - name: Typecheck & build frontend
+      - name: Typecheck frontend
         working-directory: frontend
-        run: pnpm exec tsc -b && pnpm build
+        run: pnpm exec tsc -b
 
   build:
     name: Build (${{ matrix.variant }})
