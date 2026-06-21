@@ -1,3 +1,5 @@
+import { fileURLToPath, URL } from "node:url"
+
 import tailwindcss from "@tailwindcss/vite"
 import { tanstackRouter } from "@tanstack/router-plugin/vite"
 import devtools from "solid-devtools/vite"
@@ -15,6 +17,10 @@ export default defineConfig({
   ],
   resolve: {
     tsconfigPaths: true, // Vite 8 内置 tsconfig paths 解析，自动读取 tsconfig.json 的 paths 配置
+    // 显式 @ 别名：保证路由代码分割产生的虚拟模块也能解析 @/ 导入
+    alias: {
+      "@": fileURLToPath(new URL("./src", import.meta.url)),
+    },
   },
   server: {
     proxy: {

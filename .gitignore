@@ -26,3 +26,12 @@ routeTree.gen.ts
 *.sw?
 
 tmp/
+
+# 环境变量与密钥（绝不提交，如 DEEPSEEK_API_KEY）
+.env
+.env.*
+!.env.example
+
+# Go 构建产物
+/server
+/suki-chat

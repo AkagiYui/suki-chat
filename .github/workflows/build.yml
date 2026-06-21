@@ -13,9 +13,52 @@ env:
   IMAGE_NAME: ${{ github.repository }}
 
 jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Go vet
+        run: go vet ./...
+
+      - name: Go test
+        # ubuntu runner 自带 Docker，会一并跑沙箱集成测试；
+        # DeepSeek 集成测试因未设 DEEPSEEK_API_KEY 自动跳过。
+        run: go test ./...
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+
+      - name: Install frontend deps
+        working-directory: frontend
+        run: pnpm install --frozen-lockfile
+
+      - name: Lint frontend
+        working-directory: frontend
+        run: pnpm exec eslint .
+
+      - name: Typecheck & build frontend
+        working-directory: frontend
+        run: pnpm exec tsc -b && pnpm build
+
   build:
     name: Build (${{ matrix.variant }})
     runs-on: ubuntu-latest
+    needs: test
     permissions:
       contents: read
       packages: write
