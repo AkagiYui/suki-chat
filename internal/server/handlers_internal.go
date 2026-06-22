@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"io"
@@ -46,17 +47,10 @@ func (s *Server) handleInternalChat(c *gin.Context) {
 		return
 	}
 
+	// 透明转发：保持 stream/stream_options 原样（pi-ai 用流式 + include_usage）。
 	raw, _ := io.ReadAll(io.LimitReader(c.Request.Body, 8<<20))
-	var body map[string]any
-	if err := json.Unmarshal(raw, &body); err != nil {
-		badRequest(c, "非法的请求体")
-		return
-	}
-	body["stream"] = false // 强制非流式，保证能可靠读取 usage 计量
-	fwd, _ := json.Marshal(body)
-
 	req, err := http.NewRequestWithContext(c.Request.Context(), http.MethodPost,
-		s.cfg.DeepSeek.BaseURL+"/chat/completions", bytes.NewReader(fwd))
+		s.cfg.DeepSeek.BaseURL+"/chat/completions", bytes.NewReader(raw))
 	if err != nil {
 		serverError(c, err)
 		return
@@ -70,20 +64,52 @@ func (s *Server) handleInternalChat(c *gin.Context) {
 		return
 	}
 	defer resp.Body.Close()
-	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 16<<20))
 
-	// 计量：从响应 usage 扣减配额。
+	// 边转发边计量：逐行透传上游响应（SSE 或单 JSON），从 usage 块提取 token 数。
+	c.Status(resp.StatusCode)
+	if ct := resp.Header.Get("Content-Type"); ct != "" {
+		c.Header("Content-Type", ct)
+	}
+	flusher, _ := c.Writer.(http.Flusher)
+	reader := bufio.NewReader(resp.Body)
+	var totalTokens int
+	for {
+		line, readErr := reader.ReadBytes('\n')
+		if len(line) > 0 {
+			c.Writer.Write(line)
+			if flusher != nil {
+				flusher.Flush()
+			}
+			if n := usageFromLine(line); n > 0 {
+				totalTokens = n
+			}
+		}
+		if readErr != nil {
+			break
+		}
+	}
+	if totalTokens > 0 {
+		_, _ = s.store.Users().AddQuota(c.Request.Context(), userID, -int64(totalTokens))
+	}
+}
+
+// usageFromLine 从一行响应（可能是 SSE 的 "data: {...}" 或整段 JSON）中提取 usage.total_tokens。
+func usageFromLine(line []byte) int {
+	b := bytes.TrimSpace(line)
+	if !bytes.Contains(b, []byte("total_tokens")) {
+		return 0
+	}
+	b = bytes.TrimPrefix(b, []byte("data:"))
+	b = bytes.TrimSpace(b)
 	var parsed struct {
 		Usage struct {
 			TotalTokens int `json:"total_tokens"`
 		} `json:"usage"`
 	}
-	_ = json.Unmarshal(respBody, &parsed)
-	if parsed.Usage.TotalTokens > 0 {
-		_, _ = s.store.Users().AddQuota(c.Request.Context(), userID, -int64(parsed.Usage.TotalTokens))
+	if json.Unmarshal(b, &parsed) == nil {
+		return parsed.Usage.TotalTokens
 	}
-
-	c.Data(resp.StatusCode, "application/json", respBody)
+	return 0
 }
 
 // handleInternalEvents 接收会话容器上报的事件，写入事件日志（→ SSE 扇出/回放）。

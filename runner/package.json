@@ -1,0 +1,12 @@
+{
+  "name": "suki-runner",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "每会话容器内的 agent 运行时（pi），经控制平面代理调用模型并上报事件",
+  "dependencies": {
+    "@earendil-works/pi-agent-core": "^0.79.9",
+    "@earendil-works/pi-ai": "^0.79.9",
+    "@earendil-works/pi-coding-agent": "^0.79.9"
+  }
+}

@@ -2,7 +2,6 @@ package server
 
 import (
 	"context"
-	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -37,13 +36,8 @@ func setupInternal(t *testing.T, fakeUpstream string) (*httptest.Server, *store.
 
 func TestInternalChatProxyMetersQuota(t *testing.T) {
 	var sawKey string
-	var sawStream any = "unset"
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		sawKey = r.Header.Get("Authorization")
-		var body map[string]any
-		raw, _ := io.ReadAll(r.Body)
-		_ = json.Unmarshal(raw, &body)
-		sawStream = body["stream"]
+		sawKey = r.Header.Get("Authorization") // 应是服务端真实 key，非 runner 令牌
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = io.WriteString(w, `{"choices":[{"message":{"role":"assistant","content":"hi"}}],"usage":{"total_tokens":42}}`)
 	}))
@@ -57,18 +51,13 @@ func TestInternalChatProxyMetersQuota(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("代理应 200, got %d", resp.StatusCode)
 	}
-	// 上游应收到服务端真实 key，且 stream 被强制为 false
 	if sawKey != "Bearer real-key" {
 		t.Fatalf("上游应收到服务端密钥, got %q", sawKey)
 	}
-	if sawStream != false {
-		t.Fatalf("stream 应被强制为 false, got %v", sawStream)
-	}
-	// 响应透传
 	if out["choices"] == nil {
 		t.Fatalf("应透传上游响应, got %v", out)
 	}
-	// 计量：配额扣减 42
+	// 计量：从 usage 扣减配额 42
 	u, _ := st.Users().GetByID(context.Background(), "u1")
 	if u.QuotaTokens != 958 {
 		t.Fatalf("配额应扣减为 958, got %d", u.QuotaTokens)
