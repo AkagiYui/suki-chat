@@ -37,6 +37,14 @@ func (s *Server) Router() *gin.Engine {
 		api.POST("/auth/register", s.handleRegister)
 		api.POST("/auth/login", s.handleLogin)
 
+		// 会话容器内运行时回连控制平面（runner 令牌鉴权）：模型网关代理 + 事件上报。
+		internal := api.Group("/internal")
+		internal.Use(s.runnerAuth())
+		{
+			internal.POST("/v1/chat/completions", s.handleInternalChat)
+			internal.POST("/sessions/:id/events", s.handleInternalEvents)
+		}
+
 		authed := api.Group("")
 		authed.Use(s.authRequired())
 		{
