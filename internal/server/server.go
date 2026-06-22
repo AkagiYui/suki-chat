@@ -47,6 +47,7 @@ func (s *Server) Router() *gin.Engine {
 			authed.GET("/sessions/:id", s.handleGetSession)
 			authed.POST("/sessions/:id/messages", s.handleSendMessage)
 			authed.GET("/sessions/:id/events", s.handleSessionEvents)
+			authed.GET("/sessions/:id/artifacts/:name", s.handleArtifact)
 			authed.POST("/sessions/:id/hibernate", s.handleHibernate)
 			authed.DELETE("/sessions/:id", s.handleDeleteSession)
 

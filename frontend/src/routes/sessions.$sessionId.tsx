@@ -3,7 +3,7 @@ import { createFileRoute, Link, useNavigate } from "@tanstack/solid-router"
 import { createEffect, createResource, createSignal, For, onCleanup, onMount, Show } from "solid-js"
 
 import { api, openEventStream, type SessionEvent } from "@/lib/api"
-import { isLoggedIn } from "@/lib/auth"
+import { isLoggedIn, token } from "@/lib/auth"
 
 export const Route = createFileRoute("/sessions/$sessionId")({
   component: SessionDetailPage,
@@ -184,6 +184,20 @@ function EventBlock(props: { ev: SessionEvent }) {
           </summary>
           <pre class="overflow-x-auto whitespace-pre-wrap break-all border-t border-gray-200 px-3 py-2 font-mono text-xs text-gray-600">{str(d, "output")}</pre>
         </details>
+      )
+    }
+    case "screenshot": {
+      const src = `${str(d, "url")}?token=${encodeURIComponent(token() ?? "")}`
+      return (
+        <div class="ml-9 overflow-hidden rounded-xl border border-gray-200 bg-white">
+          <div class="flex items-center gap-1.5 border-b border-gray-100 px-3 py-2 text-sm text-gray-600">
+            <Icon icon="lucide:camera" class="size-3.5" />
+            <span class="truncate">网页截图 · {str(d, "title") || str(d, "pageUrl")}</span>
+          </div>
+          <a href={str(d, "pageUrl")} target="_blank" rel="noreferrer">
+            <img src={src} alt="网页截图" class="block w-full" loading="lazy" />
+          </a>
+        </div>
       )
     }
     case "model_call":

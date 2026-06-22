@@ -9,6 +9,8 @@ package session
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -27,8 +29,9 @@ var (
 	ErrQuotaExceeded = errors.New("session: 配额不足")
 )
 
-const defaultSystemPrompt = "你是运行在云端隔离容器中的 AI 助手。你可以使用 web_fetch 抓取网页，" +
-	"使用 run_shell 在隔离沙箱的 /workspace 目录执行 shell 命令来完成任务。" +
+const defaultSystemPrompt = "你是运行在云端隔离容器中的 AI 助手。你可以使用 web_fetch 抓取网页文本，" +
+	"使用 run_shell 在隔离沙箱的 /workspace 目录执行 shell 命令，" +
+	"使用 screenshot_page 在真实的隐身浏览器中打开网页并整页截图（截图会直接展示给用户，适合“截图/看页面长什么样”的需求）。" +
 	"请用简洁的中文回答，必要时主动调用工具。"
 
 // Config 是会话管理器配置。
@@ -40,6 +43,8 @@ type Config struct {
 	Network      string
 	MaxIters     int
 	SystemPrompt string
+	BrowserCDP   string // 隐身浏览器 CDP 端点；为空则不启用截图工具
+	ArtifactsDir string // 会话工件（截图）落盘目录
 }
 
 // Manager 管理所有会话的生命周期与运行。
@@ -174,6 +179,12 @@ func (m *Manager) run(sessionID, userID, modelID, text string) {
 	emit("user_message", map[string]any{"content": text})
 
 	tools := []agent.Tool{agent.WebFetchTool(), agent.RunShellTool(sb)}
+	if m.cfg.BrowserCDP != "" {
+		save := func(name string, png []byte) (string, error) {
+			return m.saveArtifact(sessionID, name, png)
+		}
+		tools = append(tools, agent.ScreenshotTool(m.cfg.BrowserCDP, save, emit))
+	}
 	ag := agent.New(m.client, modelID, tools, m.cfg.MaxIters, emit)
 
 	rt.mu.Lock()
@@ -285,4 +296,17 @@ func (m *Manager) setStatus(ctx context.Context, sessionID string, status store.
 	}
 	s.Status = status
 	return m.sessions.Update(ctx, s)
+}
+
+// saveArtifact 把会话工件（如截图）写入 <ArtifactsDir>/<sessionID>/<name>，
+// 返回前端可访问的 API 路径。
+func (m *Manager) saveArtifact(sessionID, name string, data []byte) (string, error) {
+	dir := filepath.Join(m.cfg.ArtifactsDir, sessionID)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", err
+	}
+	if err := os.WriteFile(filepath.Join(dir, name), data, 0o644); err != nil {
+		return "", err
+	}
+	return "/api/sessions/" + sessionID + "/artifacts/" + name, nil
 }

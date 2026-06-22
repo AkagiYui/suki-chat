@@ -105,6 +105,7 @@ const EVENT_TYPES = [
   "assistant_message",
   "tool_call",
   "tool_result",
+  "screenshot",
   "error",
   "done",
 ]

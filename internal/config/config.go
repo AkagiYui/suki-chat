@@ -4,6 +4,7 @@ package config
 
 import (
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -19,6 +20,9 @@ type Config struct {
 	DeepSeek  DeepSeekConfig  // 上游模型（DeepSeek，OpenAI 兼容）
 	Sandbox   SandboxConfig   // 会话沙箱（容器）配置
 	Workspace WorkspaceConfig // 工作区存储配置
+	Browser   BrowserConfig   // 隐身浏览器服务（CloakBrowser，CDP）
+
+	ArtifactsDir string // 会话工件（截图等）落盘目录
 
 	DefaultQuotaTokens int64 // 新用户默认 token 配额（内部配额制，不接真实支付）
 
@@ -49,6 +53,12 @@ type WorkspaceConfig struct {
 	VolumePrefix string // Docker 卷名前缀
 }
 
+// BrowserConfig 描述隐身浏览器服务（CloakBrowser，CDP 端点）。
+type BrowserConfig struct {
+	// CDP 端点，形如 http://127.0.0.1:9222。为空则禁用浏览器/截图工具。
+	CDPURL string
+}
+
 // Load 从环境变量读取配置，未设置项使用合理默认值。
 func Load() Config {
 	return Config{
@@ -72,6 +82,11 @@ func Load() Config {
 			Mode:         env("SUKI_CHAT_WORKSPACE_MODE", "local"),
 			VolumePrefix: env("SUKI_CHAT_WORKSPACE_PREFIX", "suki-ws-"),
 		},
+		Browser: BrowserConfig{
+			// 默认指向本机 9222；需运行 CloakBrowser 容器后才可用，否则截图工具会优雅报错
+			CDPURL: env("SUKI_CHAT_BROWSER_CDP", "http://127.0.0.1:9222"),
+		},
+		ArtifactsDir:       env("SUKI_CHAT_ARTIFACTS_DIR", filepath.Join(os.TempDir(), "suki-chat-artifacts")),
 		DefaultQuotaTokens: envInt64("SUKI_CHAT_DEFAULT_QUOTA_TOKENS", 1_000_000),
 		AdminEmail:         env("SUKI_CHAT_ADMIN_EMAIL", "admin@example.com"),
 		AdminPassword:      env("SUKI_CHAT_ADMIN_PASSWORD", "admin12345"),

@@ -35,13 +35,18 @@ func main() {
 	}
 
 	mgr := session.NewManager(st, provider, ws, client, session.Config{
-		Image:     cfg.Sandbox.Image,
-		CPUs:      1.0,
-		MemoryMB:  512,
-		PidsLimit: 256,
-		Network:   cfg.Sandbox.Network,
-		MaxIters:  8,
+		Image:        cfg.Sandbox.Image,
+		CPUs:         1.0,
+		MemoryMB:     512,
+		PidsLimit:    256,
+		Network:      cfg.Sandbox.Network,
+		MaxIters:     8,
+		BrowserCDP:   cfg.Browser.CDPURL,
+		ArtifactsDir: cfg.ArtifactsDir,
 	})
+	if cfg.Browser.CDPURL != "" {
+		log.Printf("→ 隐身浏览器 CDP: %s（需运行 CloakBrowser 容器；截图工具已启用）", cfg.Browser.CDPURL)
+	}
 
 	tokens := auth.NewTokenManager(cfg.JWTSecret, cfg.JWTTTL)
 	srv := server.New(st, tokens, mgr, cfg)
