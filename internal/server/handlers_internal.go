@@ -171,5 +171,20 @@ func (s *Server) handleInternalEvents(c *gin.Context) {
 		serverError(c, err)
 		return
 	}
+	// runner 上报本轮结束/出错时，控制平面清运行标记并更新会话状态。
+	if ev.Type == "done" || ev.Type == "error" {
+		s.sessions.MarkDone(c.Request.Context(), c.Param("id"), ev.Type == "error")
+	}
 	c.JSON(http.StatusOK, gin.H{"status": "ok"})
+}
+
+// handleInternalNext 是 runner 的长轮询出口：阻塞等待本会话的下一条用户消息。
+// 容器纯出站（拉取 + 经出网代理回连），控制平面不主动连入容器。
+func (s *Server) handleInternalNext(c *gin.Context) {
+	if c.Param("id") != c.GetString(ctxSessionID) {
+		c.JSON(http.StatusForbidden, gin.H{"error": "会话不匹配"})
+		return
+	}
+	msg, ok := s.sessions.NextMessage(c.Request.Context(), c.Param("id"))
+	c.JSON(http.StatusOK, gin.H{"message": msg, "hasMessage": ok})
 }

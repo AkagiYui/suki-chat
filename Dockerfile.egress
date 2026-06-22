@@ -1,0 +1,12 @@
+# suki-egress —— 会话容器的"只放行互联网"出网代理（deny-by-default）。
+FROM golang:alpine AS build
+WORKDIR /app
+COPY go.mod go.sum ./
+COPY cmd/egress ./cmd/egress
+RUN CGO_ENABLED=0 go build -o /egress ./cmd/egress
+
+FROM alpine:3
+RUN apk add --no-cache ca-certificates
+COPY --from=build /egress /usr/local/bin/egress
+EXPOSE 8888
+ENTRYPOINT ["/usr/local/bin/egress"]

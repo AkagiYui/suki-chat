@@ -43,6 +43,7 @@ func (s *Server) Router() *gin.Engine {
 		{
 			internal.POST("/v1/chat/completions", s.handleInternalChat)
 			internal.POST("/sessions/:id/events", s.handleInternalEvents)
+			internal.GET("/sessions/:id/next", s.handleInternalNext)
 			internal.POST("/sessions/:id/browser", s.handleInternalBrowser)
 			internal.POST("/sessions/:id/artifacts", s.handleInternalArtifact)
 		}

@@ -52,7 +52,8 @@ type SandboxConfig struct {
 	DockerHost   string // 默认 unix:///var/run/docker.sock
 	RunnerImage  string // 会话 runner 镜像（pi 运行时），默认 suki-runner:dev
 	BrowserImage string // 浏览器镜像（CloakBrowser）
-	Network      string // 容器网络，默认 suki-net（runner 与浏览器同网，可按名互联）
+	EgressImage  string // 出网代理镜像（deny-by-default）
+	Network      string // 会话容器网络（suki-net，internal：唯一出口是出网代理）
 }
 
 // WorkspaceConfig 描述工作区存储模式。
@@ -85,6 +86,7 @@ func Load() Config {
 			DockerHost:   env("SUKI_CHAT_DOCKER_HOST", "unix:///var/run/docker.sock"),
 			RunnerImage:  env("SUKI_CHAT_RUNNER_IMAGE", "suki-runner:dev"),
 			BrowserImage: env("SUKI_CHAT_BROWSER_IMAGE", "cloakhq/cloakbrowser:latest"),
+			EgressImage:  env("SUKI_CHAT_EGRESS_IMAGE", "suki-egress:dev"),
 			Network:      env("SUKI_CHAT_SANDBOX_NETWORK", "suki-net"),
 		},
 		Workspace: WorkspaceConfig{

@@ -34,10 +34,11 @@ type ManagedContainer struct {
 }
 
 // EnsureNetwork 创建一个用户自定义 bridge 网络（已存在则幂等成功）。
-// runner 与浏览器容器同在此网络，runner 可按容器名直连浏览器，无需暴露主机端口。
-func (p *DockerProvider) EnsureNetwork(ctx context.Context, name string) error {
+// internal=true 时该网络无任何外联（无 NAT/网关到宿主或互联网）——会话容器放这里，
+// 唯一出口是出网代理。runner 与浏览器同网，可按容器名直连。
+func (p *DockerProvider) EnsureNetwork(ctx context.Context, name string, internal bool) error {
 	resp, err := p.do(ctx, http.MethodPost, "/networks/create", map[string]any{
-		"Name": name, "Driver": "bridge",
+		"Name": name, "Driver": "bridge", "Internal": internal,
 		"Labels": map[string]string{ManagedLabel: "true", "suki.kind": "network"},
 	})
 	if err != nil {
@@ -45,6 +46,18 @@ func (p *DockerProvider) EnsureNetwork(ctx context.Context, name string) error {
 	}
 	defer resp.Body.Close()
 	io.Copy(io.Discard, resp.Body) // 201=创建；403/409=已存在，均视为成功
+	return nil
+}
+
+// ConnectNetwork 把容器额外接入一个网络（出网代理需同时接 internal 网与有互联网的网）。
+func (p *DockerProvider) ConnectNetwork(ctx context.Context, network, container string) error {
+	resp, err := p.do(ctx, http.MethodPost, "/networks/"+network+"/connect",
+		map[string]any{"Container": container})
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	io.Copy(io.Discard, resp.Body) // 200=成功；403=已连接，均视为成功
 	return nil
 }
 

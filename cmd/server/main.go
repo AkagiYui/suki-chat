@@ -4,6 +4,7 @@ package main
 import (
 	"context"
 	"log"
+	"net/url"
 	"time"
 
 	"github.com/akagiyui/suki-chat/internal/auth"
@@ -40,10 +41,11 @@ func main() {
 	if !dp.Healthy(context.Background()) {
 		log.Printf("⚠ Docker 不可用（%s）——会话将无法启动。请检查 docker。", cfg.Sandbox.DockerHost)
 	}
-	// runner 与浏览器容器同处此私有网络，runner 可按容器名直连浏览器。
-	if err := dp.EnsureNetwork(context.Background(), cfg.Sandbox.Network); err != nil {
+	// 会话容器同处此 internal 私有网络（无任何外联），唯一出口是出网代理。
+	if err := dp.EnsureNetwork(context.Background(), cfg.Sandbox.Network, true); err != nil {
 		log.Printf("⚠ 创建网络 %s 失败: %v", cfg.Sandbox.Network, err)
 	}
+	startEgressProxy(dp, cfg)
 	ws := workspace.NewLocalVolumeStore(dp, cfg.Workspace.VolumePrefix)
 	tokens := auth.NewTokenManager(cfg.JWTSecret, cfg.JWTTTL)
 
@@ -70,6 +72,34 @@ func main() {
 	if err := srv.Router().Run(cfg.ListenAddr); err != nil {
 		log.Fatalf("服务器退出: %v", err)
 	}
+}
+
+// startEgressProxy 启动"只放行互联网"出网代理：接在有互联网的 bridge 上，再接入
+// internal 的会话网络；只放行公网 + 控制平面，拒绝一切私网（含云元数据）。
+func startEgressProxy(dp *sandbox.DockerProvider, cfg config.Config) {
+	ctx := context.Background()
+	controlHostPort := "host.docker.internal:8182"
+	if u, err := url.Parse(cfg.ControlURL); err == nil && u.Host != "" {
+		controlHostPort = u.Host
+	}
+	if _, _, err := dp.RunService(ctx, sandbox.ServiceSpec{
+		Name:     "suki-egress",
+		Image:    cfg.Sandbox.EgressImage,
+		Port:     8888,
+		Publish:  false,
+		Hardened: true,
+		Network:  "bridge", // 先接有互联网的网
+		Env:      map[string]string{"EGRESS_ALLOW_HOSTS": controlHostPort},
+		Labels:   map[string]string{sandbox.ManagedLabel: "true", "suki.kind": "egress"},
+	}); err != nil {
+		log.Printf("⚠ 启动出网代理失败（截图/联网将不可用）: %v", err)
+		return
+	}
+	if err := dp.ConnectNetwork(ctx, cfg.Sandbox.Network, "suki-egress"); err != nil {
+		log.Printf("⚠ 出网代理接入 %s 失败: %v", cfg.Sandbox.Network, err)
+		return
+	}
+	log.Printf("→ 出网代理 suki-egress 就绪（只放行公网 + %s，拒绝私网/元数据）", controlHostPort)
 }
 
 // bootstrapAdmin 在首次启动时创建管理员账号（若不存在）。

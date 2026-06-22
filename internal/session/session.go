@@ -10,12 +10,8 @@
 package session
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
-	"fmt"
-	"net/http"
 	"os"
 	"path/filepath"
 	"sync"
@@ -35,6 +31,7 @@ var (
 )
 
 const runnerPort = 8088
+const egressURL = "http://suki-egress:8888" // 会话容器的唯一出网通道
 
 // RunnerBackend 是会话 runner 容器的编排后端（由 sandbox.DockerProvider 实现）。
 type RunnerBackend interface {
@@ -71,10 +68,10 @@ type Manager struct {
 	ws       workspace.Store
 	tokens   TokenIssuer
 	cfg      Config
-	http     *http.Client
 
 	mu      sync.Mutex
 	runtime map[string]*sessionRuntime
+	queues  map[string]chan string // 每会话待处理消息队列（runner 长轮询拉取）
 
 	browserMu sync.Mutex
 	browsers  map[string]*browserHandle // 浏览器容器：key=user-<uid> 或 sess-<sid>
@@ -85,7 +82,6 @@ type sessionRuntime struct {
 	running      bool
 	runnerUp     bool
 	runnerName   string
-	hostPort     int
 	lastActivity time.Time
 }
 
@@ -107,8 +103,8 @@ func NewManager(s store.Store, runner RunnerBackend, ws workspace.Store, tokens 
 		ws:       ws,
 		tokens:   tokens,
 		cfg:      cfg,
-		http:     &http.Client{Timeout: 15 * time.Minute}, // agent 一轮可能较久
 		runtime:  make(map[string]*sessionRuntime),
+		queues:   make(map[string]chan string),
 		browsers: make(map[string]*browserHandle),
 	}
 }
@@ -133,9 +129,11 @@ func (m *Manager) EnsureBrowser(ctx context.Context, sess *store.Session) (strin
 		return cdp, nil
 	}
 	_, _, err := m.runner.RunService(ctx, sandbox.ServiceSpec{
-		Name:      name,
-		Image:     m.cfg.BrowserImage,
-		Cmd:       []string{"cloakserve"},
+		Name:  name,
+		Image: m.cfg.BrowserImage,
+		// --proxy-server：页面加载走出网代理；HTTP_PROXY：cloakserve 自身下载也走代理。
+		Cmd:       []string{"cloakserve", "--proxy-server=" + egressURL},
+		Env:       map[string]string{"HTTP_PROXY": egressURL, "HTTPS_PROXY": egressURL},
 		Port:      9222,
 		Publish:   false, // 走容器网络，runner 按名直连，不暴露主机端口
 		Hardened:  false, // Chromium 需要 capability
@@ -216,73 +214,58 @@ func (m *Manager) Send(ctx context.Context, sessionID, userID, text string) erro
 	s.Status = store.SessionRunning
 	_ = m.sessions.Update(ctx, s)
 
-	go m.run(sessionID, userID, s.Model, text)
+	go m.launch(sessionID, userID, s.Model, text)
 	return nil
 }
 
-func (m *Manager) run(sessionID, userID, modelID, text string) {
+// launch 后台：即时回显用户消息、确保 runner 容器在跑、把消息入队等 runner 拉取。
+// runner 纯出站（长轮询拉取 + 经出网代理回连），控制平面不主动连入容器。
+func (m *Manager) launch(sessionID, userID, modelID, text string) {
 	ctx := context.Background()
-	rt := m.runtimeFor(sessionID)
-	defer func() {
-		rt.mu.Lock()
-		rt.running = false
-		rt.mu.Unlock()
-	}()
-
 	emit := func(typ string, data any) { _, _ = m.events.Append(ctx, sessionID, typ, data) }
 	emit("user_message", map[string]any{"content": text})
 
-	hostPort, err := m.ensureRunner(ctx, sessionID, userID, modelID)
-	if err != nil {
+	if err := m.ensureRunner(ctx, sessionID, userID, modelID); err != nil {
 		emit("error", map[string]any{"message": "启动会话容器失败: " + err.Error()})
-		_ = m.setStatus(ctx, sessionID, store.SessionError)
+		m.MarkDone(ctx, sessionID, true)
 		return
 	}
-
-	if err := m.postToRunner(ctx, hostPort, text); err != nil {
-		emit("error", map[string]any{"message": "会话容器执行失败: " + err.Error()})
-		_ = m.setStatus(ctx, sessionID, store.SessionError)
-		return
-	}
-	m.touch(sessionID)
-	_ = m.setStatus(ctx, sessionID, store.SessionIdle)
+	m.enqueue(sessionID, text) // runner 长轮询会取走并处理；完成时上报 done 事件
 }
 
-// ensureRunner 确保该会话的 runner 容器在运行，返回其主机端口（按需创建）。
-func (m *Manager) ensureRunner(ctx context.Context, sessionID, userID, modelID string) (int, error) {
+// ensureRunner 确保该会话的 runner 容器在运行（按需创建，出站-only，无发布端口）。
+func (m *Manager) ensureRunner(ctx context.Context, sessionID, userID, modelID string) error {
 	rt := m.runtimeFor(sessionID)
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
 	if rt.runnerUp {
 		rt.lastActivity = time.Now()
-		return rt.hostPort, nil
+		return nil
 	}
-
 	mount, err := m.ws.Provision(ctx, sessionID, nil)
 	if err != nil {
-		return 0, err
+		return err
 	}
 	token, err := m.tokens.IssueRunner(userID, sessionID, time.Now())
 	if err != nil {
-		return 0, err
+		return err
 	}
-
 	name := "suki-runner-" + sessionID
-	_, hostPort, err := m.runner.RunService(ctx, sandbox.ServiceSpec{
+	_, _, err = m.runner.RunService(ctx, sandbox.ServiceSpec{
 		Name:     name,
 		Image:    m.cfg.RunnerImage,
-		Port:     runnerPort,
-		Publish:  true, // 控制平面经 127.0.0.1:<hostPort> 投递消息
+		Publish:  false, // 出站-only：不发布端口，控制平面不连入
 		Hardened: true,
 		Env: map[string]string{
 			"SUKI_CONTROL_URL":  m.cfg.ControlURL,
 			"SUKI_RUNNER_TOKEN": token,
 			"SUKI_SESSION_ID":   sessionID,
 			"SUKI_MODEL":        modelID,
+			"SUKI_EGRESS_URL":   egressURL, // 联网/回连控制平面都经此代理（deny-by-default）
 		},
 		Mount:     mount,
 		Resources: sandbox.ResourceLimits{CPUs: m.cfg.CPUs, MemoryMB: m.cfg.MemoryMB, PidsLimit: m.cfg.PidsLimit},
-		Network:   m.cfg.Network, // suki-net：可按名直连浏览器容器
+		Network:   m.cfg.Network, // suki-net（internal）：可按名直连浏览器与出网代理
 		Labels: map[string]string{
 			sandbox.ManagedLabel: "true",
 			"suki.session":       sessionID,
@@ -291,53 +274,57 @@ func (m *Manager) ensureRunner(ctx context.Context, sessionID, userID, modelID s
 		},
 	})
 	if err != nil {
-		return 0, err
-	}
-	if err := m.waitRunnerReady(ctx, hostPort); err != nil {
-		_ = m.runner.RemoveContainer(ctx, name)
-		return 0, err
+		return err
 	}
 	rt.runnerUp = true
 	rt.runnerName = name
-	rt.hostPort = hostPort
 	rt.lastActivity = time.Now()
-	return hostPort, nil
-}
-
-func (m *Manager) waitRunnerReady(ctx context.Context, hostPort int) error {
-	deadline := time.Now().Add(40 * time.Second)
-	url := fmt.Sprintf("http://127.0.0.1:%d/health", hostPort)
-	for time.Now().Before(deadline) {
-		req, _ := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-		resp, err := (&http.Client{Timeout: 2 * time.Second}).Do(req)
-		if err == nil {
-			resp.Body.Close()
-			if resp.StatusCode == http.StatusOK {
-				return nil
-			}
-		}
-		time.Sleep(400 * time.Millisecond)
-	}
-	return fmt.Errorf("runner 容器未在限定时间内就绪")
-}
-
-func (m *Manager) postToRunner(ctx context.Context, hostPort int, message string) error {
-	body, _ := json.Marshal(map[string]string{"message": message})
-	url := fmt.Sprintf("http://127.0.0.1:%d/run", hostPort)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := m.http.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("runner 返回 %d", resp.StatusCode)
-	}
 	return nil
+}
+
+func (m *Manager) queueFor(sessionID string) chan string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	q := m.queues[sessionID]
+	if q == nil {
+		q = make(chan string, 8)
+		m.queues[sessionID] = q
+	}
+	return q
+}
+
+func (m *Manager) enqueue(sessionID, text string) {
+	select {
+	case m.queueFor(sessionID) <- text:
+	default: // 队列满则丢弃（busy 已防并发，正常不会发生）
+	}
+}
+
+// NextMessage 供 runner 长轮询：阻塞等待该会话的下一条消息（带超时，让 runner 周期性重连）。
+func (m *Manager) NextMessage(ctx context.Context, sessionID string) (string, bool) {
+	select {
+	case msg := <-m.queueFor(sessionID):
+		m.touch(sessionID)
+		return msg, true
+	case <-time.After(25 * time.Second):
+		return "", false
+	case <-ctx.Done():
+		return "", false
+	}
+}
+
+// MarkDone 由事件接收处在 runner 上报 done/error 时调用：清运行标记、更新会话状态。
+func (m *Manager) MarkDone(ctx context.Context, sessionID string, isError bool) {
+	rt := m.runtimeFor(sessionID)
+	rt.mu.Lock()
+	rt.running = false
+	rt.lastActivity = time.Now()
+	rt.mu.Unlock()
+	status := store.SessionIdle
+	if isError {
+		status = store.SessionError
+	}
+	_ = m.setStatus(ctx, sessionID, status)
 }
 
 // Hibernate 休眠：停止并移除 runner 容器，保留工作区。
@@ -379,7 +366,6 @@ func (m *Manager) teardownRunner(ctx context.Context, rt *sessionRuntime) {
 	}
 	rt.runnerUp = false
 	rt.runnerName = ""
-	rt.hostPort = 0
 }
 
 // ListManagedContainers 返回所有受控容器（供管理员查看）。

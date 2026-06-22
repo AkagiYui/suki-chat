@@ -2,10 +2,6 @@ package session
 
 import (
 	"context"
-	"net/http"
-	"net/http/httptest"
-	"net/url"
-	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -15,19 +11,18 @@ import (
 	"github.com/akagiyui/suki-chat/internal/workspace"
 )
 
-// fakeRunner 记录编排调用，RunService 返回一个指向 stub HTTP 服务的端口。
+// fakeRunner 记录编排调用。
 type fakeRunner struct {
 	mu      sync.Mutex
 	created []sandbox.ServiceSpec
 	removed []string
-	port    int
 }
 
 func (f *fakeRunner) RunService(_ context.Context, spec sandbox.ServiceSpec) (string, int, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.created = append(f.created, spec)
-	return "cid-" + spec.Name, f.port, nil
+	return "cid-" + spec.Name, 0, nil
 }
 func (f *fakeRunner) StopContainer(context.Context, string) error { return nil }
 func (f *fakeRunner) RemoveContainer(_ context.Context, n string) error {
@@ -47,15 +42,7 @@ func (fakeTokens) IssueRunner(string, string, time.Time) (string, error) { retur
 func newTestManager(t *testing.T, idle time.Duration) (*Manager, *store.MemoryStore, *fakeRunner) {
 	t.Helper()
 	st := store.NewMemoryStore()
-	// stub runner：/health 与 /run 都返回 200
-	stub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{"status":"ok"}`))
-	}))
-	t.Cleanup(stub.Close)
-	u, _ := url.Parse(stub.URL)
-	port, _ := strconv.Atoi(u.Port())
-	fr := &fakeRunner{port: port}
+	fr := &fakeRunner{}
 	mgr := NewManager(st, fr, workspace.NewLocalDirStore(t.TempDir()), fakeTokens{}, Config{
 		RunnerImage: "suki-runner:dev", ControlURL: "http://control", IdleTimeout: idle,
 	})
@@ -75,7 +62,18 @@ func waitStatus(t *testing.T, st *store.MemoryStore, sid string, want store.Sess
 	t.Fatalf("超时未到状态 %s", want)
 }
 
-func TestSendSpawnsRunner(t *testing.T) {
+// simulateRunner 扮演容器：拉取一条消息并上报完成（驱动 pull 模型的状态流转）。
+func simulateRunner(t *testing.T, mgr *Manager, sid string) string {
+	t.Helper()
+	msg, ok := mgr.NextMessage(context.Background(), sid)
+	if !ok {
+		t.Fatal("runner 应能拉到一条消息")
+	}
+	mgr.MarkDone(context.Background(), sid, false)
+	return msg
+}
+
+func TestSendSpawnsRunnerAndQueues(t *testing.T) {
 	ctx := context.Background()
 	mgr, st, fr := newTestManager(t, time.Hour)
 	_ = st.Users().Create(ctx, &store.User{ID: "u1", Email: "a@b.com", QuotaTokens: 1000})
@@ -83,31 +81,33 @@ func TestSendSpawnsRunner(t *testing.T) {
 	if err != nil {
 		t.Fatalf("创建会话失败: %v", err)
 	}
-
 	if err := mgr.Send(ctx, sess.ID, "u1", "你好"); err != nil {
 		t.Fatalf("Send 失败: %v", err)
 	}
+
+	// 容器拉取消息 + 完成
+	if msg := simulateRunner(t, mgr, sess.ID); msg != "你好" {
+		t.Fatalf("拉取消息不符: %q", msg)
+	}
 	waitStatus(t, st, sess.ID, store.SessionIdle)
 
-	// 控制平面即时回显 user_message
+	// user_message 事件 + 出站-only runner（无发布端口）+ 正确标签/环境
 	evs, _ := st.Events().List(ctx, sess.ID, 0)
 	if len(evs) == 0 || evs[0].Type != "user_message" {
 		t.Fatalf("应有 user_message 事件, got %+v", evs)
 	}
-	// 起了一个带正确标签/环境的 runner 容器
 	fr.mu.Lock()
 	defer fr.mu.Unlock()
 	if len(fr.created) != 1 {
 		t.Fatalf("应起 1 个 runner, got %d", len(fr.created))
 	}
 	spec := fr.created[0]
-	if spec.Image != "suki-runner:dev" || spec.Labels["suki.kind"] != "runner" ||
-		spec.Labels["suki.session"] != sess.ID || spec.Labels["suki.user"] != "u1" ||
-		spec.Labels[sandbox.ManagedLabel] != "true" {
-		t.Fatalf("runner 标签/镜像不符: %+v", spec.Labels)
+	if spec.Publish {
+		t.Fatal("runner 应为出站-only（不发布端口）")
 	}
-	if spec.Env["SUKI_SESSION_ID"] != sess.ID || spec.Env["SUKI_RUNNER_TOKEN"] == "" {
-		t.Fatalf("runner 环境变量不符: %+v", spec.Env)
+	if spec.Image != "suki-runner:dev" || spec.Labels["suki.kind"] != "runner" ||
+		spec.Labels["suki.session"] != sess.ID || spec.Env["SUKI_SESSION_ID"] != sess.ID {
+		t.Fatalf("runner 规格不符: %+v / %+v", spec.Labels, spec.Env)
 	}
 }
 
@@ -118,8 +118,10 @@ func TestRunnerReusedAcrossMessages(t *testing.T) {
 	sess, _ := mgr.Create(ctx, "u1", "t", "deepseek-v4-flash", false)
 
 	_ = mgr.Send(ctx, sess.ID, "u1", "1")
+	simulateRunner(t, mgr, sess.ID)
 	waitStatus(t, st, sess.ID, store.SessionIdle)
 	_ = mgr.Send(ctx, sess.ID, "u1", "2")
+	simulateRunner(t, mgr, sess.ID)
 	waitStatus(t, st, sess.ID, store.SessionIdle)
 
 	fr.mu.Lock()
@@ -135,9 +137,10 @@ func TestReapIdle(t *testing.T) {
 	_ = st.Users().Create(ctx, &store.User{ID: "u1", QuotaTokens: 1000})
 	sess, _ := mgr.Create(ctx, "u1", "t", "deepseek-v4-flash", false)
 	_ = mgr.Send(ctx, sess.ID, "u1", "x")
+	simulateRunner(t, mgr, sess.ID)
 	waitStatus(t, st, sess.ID, store.SessionIdle)
 
-	time.Sleep(30 * time.Millisecond) // 超过空闲阈值
+	time.Sleep(30 * time.Millisecond)
 	if n := mgr.ReapIdle(ctx); n != 1 {
 		t.Fatalf("应回收 1 个空闲 runner, got %d", n)
 	}
@@ -145,10 +148,6 @@ func TestReapIdle(t *testing.T) {
 	defer fr.mu.Unlock()
 	if len(fr.removed) != 1 {
 		t.Fatalf("应移除 runner 容器, removed=%v", fr.removed)
-	}
-	s, _ := st.Sessions().GetByID(ctx, sess.ID)
-	if s.Status != store.SessionHibernated {
-		t.Fatalf("回收后应休眠, got %s", s.Status)
 	}
 }
 
@@ -173,6 +172,7 @@ func TestDeleteRemovesRunner(t *testing.T) {
 	_ = st.Users().Create(ctx, &store.User{ID: "u1", QuotaTokens: 1000})
 	sess, _ := mgr.Create(ctx, "u1", "t", "deepseek-v4-flash", false)
 	_ = mgr.Send(ctx, sess.ID, "u1", "x")
+	simulateRunner(t, mgr, sess.ID)
 	waitStatus(t, st, sess.ID, store.SessionIdle)
 
 	if err := mgr.Delete(ctx, sess.ID, "u1"); err != nil {

@@ -7,8 +7,6 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -22,11 +20,11 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-// stubRunner 是 session.RunnerBackend 的桩：RunService 返回一个指向 stub HTTP 服务的端口。
-type stubRunner struct{ port int }
+// stubRunner 是 session.RunnerBackend 的桩（出站-only：RunService 不发布端口）。
+type stubRunner struct{}
 
-func (s stubRunner) RunService(_ context.Context, spec sandbox.ServiceSpec) (string, int, error) {
-	return "cid", s.port, nil
+func (stubRunner) RunService(_ context.Context, _ sandbox.ServiceSpec) (string, int, error) {
+	return "cid", 0, nil
 }
 func (stubRunner) StopContainer(context.Context, string) error   { return nil }
 func (stubRunner) RemoveContainer(context.Context, string) error { return nil }
@@ -43,14 +41,7 @@ func setup(t *testing.T) (*httptest.Server, *store.MemoryStore) {
 	gin.SetMode(gin.TestMode)
 	st := store.NewMemoryStore()
 	tokens := auth.NewTokenManager("test-secret", time.Hour)
-	stub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{"status":"ok"}`))
-	}))
-	t.Cleanup(stub.Close)
-	u, _ := url.Parse(stub.URL)
-	port, _ := strconv.Atoi(u.Port())
-	mgr := session.NewManager(st, stubRunner{port: port}, workspace.NewLocalDirStore(t.TempDir()), tokens, session.Config{
+	mgr := session.NewManager(st, stubRunner{}, workspace.NewLocalDirStore(t.TempDir()), tokens, session.Config{
 		RunnerImage: "suki-runner:dev", ControlURL: "http://control", IdleTimeout: time.Hour,
 	})
 	cfg := config.Config{DefaultQuotaTokens: 1000, DeepSeek: config.DeepSeekConfig{FastModel: "deepseek-v4-flash", ProModel: "deepseek-v4-pro"}}
@@ -147,14 +138,25 @@ func TestSessionAPIAndSSE(t *testing.T) {
 		t.Fatalf("发送消息应 202, got %d", resp.StatusCode)
 	}
 
-	// 轮询直到完成
-	deadline := time.Now().Add(3 * time.Second)
+	// 扮演 runner（pull 模型）：长轮询取出消息，再上报 done
+	runnerTok, _ := auth.NewTokenManager("test-secret", time.Hour).IssueRunner("u", sessID, time.Now())
+	nresp, nout := doJSON(t, http.MethodGet, ts.URL+"/api/internal/sessions/"+sessID+"/next", runnerTok, nil)
+	if nresp.StatusCode != http.StatusOK || nout["hasMessage"] != true || nout["message"] != "执行 echo" {
+		t.Fatalf("runner 长轮询应取到消息, got %d %v", nresp.StatusCode, nout)
+	}
+	doJSON(t, http.MethodPost, ts.URL+"/api/internal/sessions/"+sessID+"/events", runnerTok, map[string]any{"type": "done"})
+
+	// done 上报后状态应回到 idle
+	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
 		s, _ := st.Sessions().GetByID(context.Background(), sessID)
 		if s.Status == store.SessionIdle {
 			break
 		}
-		time.Sleep(20 * time.Millisecond)
+		time.Sleep(15 * time.Millisecond)
+	}
+	if s, _ := st.Sessions().GetByID(context.Background(), sessID); s.Status != store.SessionIdle {
+		t.Fatalf("done 上报后应回到 idle, got %s", s.Status)
 	}
 
 	// SSE 回放：用 token query 参数 + last_seq=0，带超时读取已缓冲的历史事件

@@ -7,8 +7,18 @@
 // - 事件：订阅 pi 事件并上报到控制平面事件接口（→ SSE/回放）。
 // - HTTP：监听 :8088，POST /run {message} 触发一轮；进程常驻以保留会话上下文。
 
-import http from "node:http"
 import process from "node:process"
+
+import { Agent, ProxyAgent, setGlobalDispatcher } from "undici"
+
+// 全部出网（web_fetch、回连控制平面、模型调用）都经出网代理（deny-by-default）。
+// 注意：playwright 连浏览器用自己的网络栈，不走全局 dispatcher，故 CDP 直连（同 internal 网）。
+const EGRESS_URL = process.env.SUKI_EGRESS_URL
+if (EGRESS_URL) {
+  setGlobalDispatcher(new ProxyAgent(EGRESS_URL))
+}
+// directAgent：绕过出网代理，用于直连同网内的浏览器容器（代理会拒绝私网地址）。
+const directAgent = new Agent()
 
 import { AuthStorage, createAgentSession, ModelRegistry, SessionManager } from "@earendil-works/pi-coding-agent"
 import { streamSimple, Type } from "@earendil-works/pi-ai"
@@ -18,7 +28,6 @@ const CONTROL_URL = (process.env.SUKI_CONTROL_URL || "").replace(/\/$/, "")
 const RUNNER_TOKEN = process.env.SUKI_RUNNER_TOKEN || ""
 const SESSION_ID = process.env.SUKI_SESSION_ID || ""
 const MODEL_ID = process.env.SUKI_MODEL || "deepseek-v4-flash"
-const BROWSER_CDP = process.env.SUKI_BROWSER_CDP || "" // 预留：浏览器/截图工具
 
 // 上报事件到控制平面
 async function emit(type, data) {
@@ -92,12 +101,12 @@ async function uploadArtifact(name, buf) {
 
 // 等待浏览器 CDP 就绪（CloakBrowser 冷启动需初始化，首次可达数十秒）。
 async function waitBrowserReady(cdp) {
-  const deadline = Date.now() + 80000
+  const deadline = Date.now() + 150000 // CloakBrowser 冷启动经代理下载 Chromium 较慢
   while (Date.now() < deadline) {
     try {
       const ac = new AbortController()
       const t = setTimeout(() => ac.abort(), 3000)
-      const r = await fetch(cdp + "/json/version", { signal: ac.signal })
+      const r = await fetch(cdp + "/json/version", { signal: ac.signal, dispatcher: directAgent })
       clearTimeout(t)
       if (r.ok) return
     } catch {
@@ -118,21 +127,35 @@ const screenshotTool = {
   execute: async (_id, params) => {
     const cdp = await getBrowserCdp()
     await waitBrowserReady(cdp)
-    const browser = await chromium.connectOverCDP(cdp)
-    try {
-      const context = await browser.newContext() // 每次独立上下文，用完即弃
-      const page = await context.newPage()
-      await page.goto(params.url, { waitUntil: "load", timeout: 45000 })
-      await page.waitForTimeout(2000)
-      const title = await page.title()
-      const buf = await page.screenshot({ fullPage: true, type: "png" })
-      await context.close()
-      const url = await uploadArtifact(`shot-${Date.now()}.png`, buf)
-      emit("screenshot", { url, pageUrl: params.url, title })
-      return { content: [{ type: "text", text: `已在隐身浏览器中打开并整页截图（标题：${title}），已展示给用户。` }], details: {} }
-    } finally {
-      await browser.close()
+    // CloakBrowser 多路复用器需 ?fingerprint=<seed> 才分配浏览器实例（每会话用稳定 seed）。
+    // 冷启动时 Chromium 可能刚好还没就绪（连上即关），重试几次。
+    let lastErr
+    for (let attempt = 0; attempt < 4; attempt++) {
+      let browser
+      try {
+        browser = await chromium.connectOverCDP(`${cdp}?fingerprint=${SESSION_ID}`)
+        const context = await browser.newContext() // 每次独立上下文，用完即弃
+        const page = await context.newPage()
+        await page.goto(params.url, { waitUntil: "load", timeout: 45000 })
+        await page.waitForTimeout(2000)
+        const title = await page.title()
+        const buf = await page.screenshot({ fullPage: true, type: "png" })
+        await context.close()
+        await browser.close()
+        const url = await uploadArtifact(`shot-${Date.now()}.png`, buf)
+        emit("screenshot", { url, pageUrl: params.url, title })
+        return { content: [{ type: "text", text: `已在隐身浏览器中打开并整页截图（标题：${title}），已展示给用户。` }], details: {} }
+      } catch (e) {
+        lastErr = e
+        try {
+          if (browser) await browser.close()
+        } catch {
+          // ignore
+        }
+        await sleep(4000)
+      }
     }
+    throw lastErr
   },
 }
 
@@ -193,48 +216,42 @@ async function getSession() {
 
 async function runOnce(message) {
   // 注意：user_message 由控制平面在投递前发出（即时回显），此处不重复。
-  const session = await getSession()
-  await session.prompt(message)
-  await emit("done", { finishReason: "stop" })
+  try {
+    const session = await getSession()
+    await session.prompt(message)
+    await emit("done", { finishReason: "stop" })
+  } catch (e) {
+    await emit("error", { message: String(e?.message || e) })
+  }
+}
+
+function sleep(ms) {
+  return new Promise((r) => setTimeout(r, ms))
 }
 
 // --once 模式：跑一条消息后退出，便于调试 pi
 if (process.argv[2] === "--once") {
-  runOnce(process.argv[3] || "你好")
-    .then(() => process.exit(0))
-    .catch((e) => {
-      console.error(e)
-      emit("error", { message: String(e?.message || e) }).finally(() => process.exit(1))
-    })
+  runOnce(process.argv[3] || "你好").then(() => process.exit(0))
 } else {
-  const server = http.createServer(async (req, res) => {
-    if (req.method === "POST" && req.url === "/run") {
-      let body = ""
-      for await (const c of req) body += c
-      let message = ""
+  // 长轮询：纯出站。拉取下一条消息 → 处理 → 再拉。容器不接受任何入站连接，
+  // 配合 internal 网络 + 出网代理实现 deny-by-default 隔离。
+  ;(async () => {
+    console.log(`suki-runner 长轮询启动 (session ${SESSION_ID}, egress ${EGRESS_URL || "off"})`)
+    for (;;) {
       try {
-        message = JSON.parse(body || "{}").message || ""
-      } catch {
-        res.writeHead(400)
-        res.end("bad json")
-        return
-      }
-      try {
-        await runOnce(message)
-        res.writeHead(200, { "Content-Type": "application/json" })
-        res.end(JSON.stringify({ status: "ok" }))
+        const r = await fetch(`${CONTROL_URL}/api/internal/sessions/${SESSION_ID}/next`, {
+          headers: { Authorization: `Bearer ${RUNNER_TOKEN}` },
+        })
+        if (!r.ok) {
+          await sleep(2000)
+          continue
+        }
+        const { message, hasMessage } = await r.json()
+        if (hasMessage && message) await runOnce(message)
       } catch (e) {
-        await emit("error", { message: String(e?.message || e) })
-        res.writeHead(500)
-        res.end(JSON.stringify({ error: String(e?.message || e) }))
+        console.error("[poll] error:", e?.message || e)
+        await sleep(2000)
       }
-    } else if (req.url === "/health") {
-      res.writeHead(200)
-      res.end("ok")
-    } else {
-      res.writeHead(404)
-      res.end()
     }
-  })
-  server.listen(8088, () => console.log(`suki-runner listening :8088 (session ${SESSION_ID}, browser=${BROWSER_CDP || "off"})`))
+  })()
 }
