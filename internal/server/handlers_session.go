@@ -22,8 +22,9 @@ func (s *Server) handleListSessions(c *gin.Context) {
 
 func (s *Server) handleCreateSession(c *gin.Context) {
 	var req struct {
-		Title string `json:"title"`
-		Model string `json:"model"`
+		Title              string `json:"title"`
+		Model              string `json:"model"`
+		IndependentBrowser bool   `json:"independentBrowser"`
 	}
 	_ = c.ShouldBindJSON(&req)
 	if req.Model == "" {
@@ -33,7 +34,7 @@ func (s *Server) handleCreateSession(c *gin.Context) {
 		badRequest(c, "不支持的模型")
 		return
 	}
-	sess, err := s.sessions.Create(c.Request.Context(), currentUserID(c), req.Title, req.Model)
+	sess, err := s.sessions.Create(c.Request.Context(), currentUserID(c), req.Title, req.Model, req.IndependentBrowser)
 	if err != nil {
 		serverError(c, err)
 		return

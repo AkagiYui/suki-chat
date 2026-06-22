@@ -4,13 +4,10 @@ package main
 import (
 	"context"
 	"log"
-	"os"
-	"path/filepath"
 	"time"
 
 	"github.com/akagiyui/suki-chat/internal/auth"
 	"github.com/akagiyui/suki-chat/internal/config"
-	"github.com/akagiyui/suki-chat/internal/model"
 	"github.com/akagiyui/suki-chat/internal/sandbox"
 	"github.com/akagiyui/suki-chat/internal/server"
 	"github.com/akagiyui/suki-chat/internal/session"
@@ -26,55 +23,36 @@ func main() {
 	st := store.NewMemoryStore()
 	bootstrapAdmin(st, cfg)
 
-	provider, ws := buildSandboxLayer(cfg)
-	log.Printf("→ 沙箱后端: %s (mode=%s)", provider.Name(), cfg.Sandbox.Mode)
+	// Docker 是会话 runner 容器的运行后端（必需）。
+	dp := sandbox.NewDockerProvider("docker/local", cfg.Sandbox.DockerHost)
+	if !dp.Healthy(context.Background()) {
+		log.Printf("⚠ Docker 不可用（%s）——会话将无法启动。请检查 docker。", cfg.Sandbox.DockerHost)
+	}
+	ws := workspace.NewLocalVolumeStore(dp, cfg.Workspace.VolumePrefix)
+	tokens := auth.NewTokenManager(cfg.JWTSecret, cfg.JWTTTL)
 
-	client := model.NewDeepSeekClient(cfg.DeepSeek.APIKey, cfg.DeepSeek.BaseURL)
 	if cfg.DeepSeek.APIKey == "" {
-		log.Printf("⚠ 未配置 DeepSeek API Key（SUKI_CHAT_DEEPSEEK_API_KEY / DEEPSEEK_API_KEY），agent 调用将失败")
+		log.Printf("⚠ 未配置 DeepSeek API Key（SUKI_CHAT_DEEPSEEK_API_KEY / DEEPSEEK_API_KEY），模型调用将失败")
 	}
 
-	mgr := session.NewManager(st, provider, ws, client, session.Config{
-		Image:        cfg.Sandbox.Image,
+	mgr := session.NewManager(st, dp, ws, tokens, session.Config{
+		RunnerImage:  cfg.Sandbox.RunnerImage,
+		ControlURL:   cfg.ControlURL,
 		CPUs:         1.0,
-		MemoryMB:     512,
-		PidsLimit:    256,
+		MemoryMB:     1024,
+		PidsLimit:    512,
 		Network:      cfg.Sandbox.Network,
-		MaxIters:     8,
-		BrowserCDP:   cfg.Browser.CDPURL,
+		IdleTimeout:  cfg.IdleTimeout,
 		ArtifactsDir: cfg.ArtifactsDir,
 	})
-	if cfg.Browser.CDPURL != "" {
-		log.Printf("→ 隐身浏览器 CDP: %s（需运行 CloakBrowser 容器；截图工具已启用）", cfg.Browser.CDPURL)
-	}
+	mgr.StartReaper(context.Background())
+	log.Printf("→ runner 镜像: %s；回连地址: %s；空闲回收: %s", cfg.Sandbox.RunnerImage, cfg.ControlURL, cfg.IdleTimeout)
 
-	tokens := auth.NewTokenManager(cfg.JWTSecret, cfg.JWTTTL)
 	srv := server.New(st, tokens, mgr, cfg)
-
 	log.Printf("→ 监听 %s", cfg.ListenAddr)
 	if err := srv.Router().Run(cfg.ListenAddr); err != nil {
 		log.Fatalf("服务器退出: %v", err)
 	}
-}
-
-// buildSandboxLayer 根据配置组装沙箱 Provider 与工作区存储（组装入口/composition root）。
-// 这里是"先用 Docker 跑 MVP、日后可换后端/存储"的唯一拼装点。
-func buildSandboxLayer(cfg config.Config) (sandbox.Provider, workspace.Store) {
-	if cfg.Sandbox.Mode == "docker" {
-		dp := sandbox.NewDockerProvider("docker/local", cfg.Sandbox.DockerHost)
-		if !dp.Healthy(context.Background()) {
-			log.Printf("⚠ Docker 不可用（%s），回退到 local 沙箱（仅供开发，无隔离）", cfg.Sandbox.DockerHost)
-			return sandbox.NewLocalProvider(), workspace.NewLocalDirStore(localWorkspaceDir())
-		}
-		return dp, workspace.NewLocalVolumeStore(dp, cfg.Workspace.VolumePrefix)
-	}
-	return sandbox.NewLocalProvider(), workspace.NewLocalDirStore(localWorkspaceDir())
-}
-
-func localWorkspaceDir() string {
-	dir := filepath.Join(os.TempDir(), "suki-chat-workspaces")
-	_ = os.MkdirAll(dir, 0o755)
-	return dir
 }
 
 // bootstrapAdmin 在首次启动时创建管理员账号（若不存在）。

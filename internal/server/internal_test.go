@@ -11,7 +11,6 @@ import (
 
 	"github.com/akagiyui/suki-chat/internal/auth"
 	"github.com/akagiyui/suki-chat/internal/config"
-	"github.com/akagiyui/suki-chat/internal/sandbox"
 	"github.com/akagiyui/suki-chat/internal/session"
 	"github.com/akagiyui/suki-chat/internal/store"
 	"github.com/akagiyui/suki-chat/internal/workspace"
@@ -28,7 +27,7 @@ func setupInternal(t *testing.T, fakeUpstream string) (*httptest.Server, *store.
 
 	tokens := auth.NewTokenManager("test-secret", time.Hour)
 	cfg := config.Config{DeepSeek: config.DeepSeekConfig{BaseURL: fakeUpstream, APIKey: "real-key", FastModel: "deepseek-v4-flash", ProModel: "deepseek-v4-pro"}}
-	mgr := session.NewManager(st, sandbox.NewLocalProvider(), workspace.NewLocalDirStore(t.TempDir()), &fakeClient{}, session.Config{})
+	mgr := session.NewManager(st, stubRunner{}, workspace.NewLocalDirStore(t.TempDir()), tokens, session.Config{IdleTimeout: time.Hour})
 	ts := httptest.NewServer(New(st, tokens, mgr, cfg).Router())
 	t.Cleanup(ts.Close)
 	return ts, st, tokens
@@ -76,7 +75,7 @@ func TestInternalChatProxyIntegration(t *testing.T) {
 	_ = st.Sessions().Create(context.Background(), &store.Session{ID: "s1", UserID: "u1"})
 	tokens := auth.NewTokenManager("test-secret", time.Hour)
 	cfg := config.Config{DeepSeek: config.DeepSeekConfig{BaseURL: "https://api.deepseek.com", APIKey: key, FastModel: "deepseek-v4-flash"}}
-	mgr := session.NewManager(st, sandbox.NewLocalProvider(), workspace.NewLocalDirStore(t.TempDir()), &fakeClient{}, session.Config{})
+	mgr := session.NewManager(st, stubRunner{}, workspace.NewLocalDirStore(t.TempDir()), tokens, session.Config{IdleTimeout: time.Hour})
 	ts := httptest.NewServer(New(st, tokens, mgr, cfg).Router())
 	defer ts.Close()
 

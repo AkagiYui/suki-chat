@@ -48,16 +48,16 @@ const (
 	SessionError      SessionStatus = "error"
 )
 
-// Session 是用户的一个云端会话。每个会话对应一个隔离容器。
+// Session 是用户的一个云端会话。每个会话对应一个隔离 runner 容器。
 type Session struct {
-	ID        string        `json:"id"`
-	UserID    string        `json:"userId"`
-	Title     string        `json:"title"`
-	Model     string        `json:"model"`
-	Status    SessionStatus `json:"status"`
-	Node      string        `json:"node"` // 运行所在的沙箱后端（多机调度记录用）
-	CreatedAt time.Time     `json:"createdAt"`
-	UpdatedAt time.Time     `json:"updatedAt"`
+	ID                 string        `json:"id"`
+	UserID             string        `json:"userId"`
+	Title              string        `json:"title"`
+	Model              string        `json:"model"`
+	Status             SessionStatus `json:"status"`
+	IndependentBrowser bool          `json:"independentBrowser"` // true=独立浏览器；默认共享用户浏览器
+	CreatedAt          time.Time     `json:"createdAt"`
+	UpdatedAt          time.Time     `json:"updatedAt"`
 }
 
 // Event 是会话事件日志中的一条（append-only），用于流式下发与断线回放。

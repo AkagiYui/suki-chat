@@ -122,7 +122,7 @@ async function getSession() {
 }
 
 async function runOnce(message) {
-  await emit("user_message", { content: message })
+  // 注意：user_message 由控制平面在投递前发出（即时回显），此处不重复。
   const session = await getSession()
   await session.prompt(message)
   await emit("done", { finishReason: "stop" })

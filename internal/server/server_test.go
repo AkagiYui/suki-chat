@@ -7,13 +7,14 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/akagiyui/suki-chat/internal/auth"
 	"github.com/akagiyui/suki-chat/internal/config"
-	"github.com/akagiyui/suki-chat/internal/model"
 	"github.com/akagiyui/suki-chat/internal/sandbox"
 	"github.com/akagiyui/suki-chat/internal/session"
 	"github.com/akagiyui/suki-chat/internal/store"
@@ -21,23 +22,20 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-type fakeClient struct{ n int }
+// stubRunner 是 session.RunnerBackend 的桩：RunService 返回一个指向 stub HTTP 服务的端口。
+type stubRunner struct{ port int }
 
-func (c *fakeClient) Chat(_ context.Context, _ model.ChatRequest) (*model.ChatResponse, error) {
-	c.n++
-	if c.n == 1 {
-		return &model.ChatResponse{
-			Message: model.Message{Role: model.RoleAssistant, ToolCalls: []model.ToolCall{
-				{ID: "c1", Type: "function", Function: model.FunctionCall{Name: "run_shell", Arguments: `{"command":"echo hi"}`}},
-			}},
-			Usage: model.Usage{TotalTokens: 10},
-		}, nil
-	}
-	return &model.ChatResponse{
-		Message:      model.Message{Role: model.RoleAssistant, Content: "已完成"},
-		FinishReason: "stop",
-		Usage:        model.Usage{TotalTokens: 20},
-	}, nil
+func (s stubRunner) RunService(_ context.Context, spec sandbox.ServiceSpec) (string, int, error) {
+	return "cid", s.port, nil
+}
+func (stubRunner) StopContainer(context.Context, string) error   { return nil }
+func (stubRunner) RemoveContainer(context.Context, string) error { return nil }
+func (stubRunner) ListManaged(context.Context) ([]sandbox.ManagedContainer, error) {
+	return []sandbox.ManagedContainer{{
+		ID: "c1abc", Names: []string{"/suki-runner-s1"},
+		Labels: map[string]string{sandbox.ManagedLabel: "true", "suki.user": "u1", "suki.session": "s1", "suki.kind": "runner"},
+		State:  "running",
+	}}, nil
 }
 
 func setup(t *testing.T) (*httptest.Server, *store.MemoryStore) {
@@ -45,7 +43,16 @@ func setup(t *testing.T) (*httptest.Server, *store.MemoryStore) {
 	gin.SetMode(gin.TestMode)
 	st := store.NewMemoryStore()
 	tokens := auth.NewTokenManager("test-secret", time.Hour)
-	mgr := session.NewManager(st, sandbox.NewLocalProvider(), workspace.NewLocalDirStore(t.TempDir()), &fakeClient{}, session.Config{Image: "alpine:3", MaxIters: 6})
+	stub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"status":"ok"}`))
+	}))
+	t.Cleanup(stub.Close)
+	u, _ := url.Parse(stub.URL)
+	port, _ := strconv.Atoi(u.Port())
+	mgr := session.NewManager(st, stubRunner{port: port}, workspace.NewLocalDirStore(t.TempDir()), tokens, session.Config{
+		RunnerImage: "suki-runner:dev", ControlURL: "http://control", IdleTimeout: time.Hour,
+	})
 	cfg := config.Config{DefaultQuotaTokens: 1000, DeepSeek: config.DeepSeekConfig{FastModel: "deepseek-v4-flash", ProModel: "deepseek-v4-pro"}}
 	ts := httptest.NewServer(New(st, tokens, mgr, cfg).Router())
 	t.Cleanup(ts.Close)
@@ -161,10 +168,27 @@ func TestSessionAPIAndSSE(t *testing.T) {
 	data, _ := io.ReadAll(sseResp.Body) // 超时关闭后返回已读取的内容
 	sseResp.Body.Close()
 	body := string(data)
-	for _, want := range []string{"event: user_message", "event: tool_result", "event: done", "已完成"} {
-		if !strings.Contains(body, want) {
-			t.Fatalf("SSE 回放缺少 %q，实际:\n%s", want, body)
-		}
+	// 控制平面即时回显的 user_message 应经 SSE 回放可见（agent 事件由 runner 容器上报，E2E 覆盖）。
+	if !strings.Contains(body, "event: user_message") {
+		t.Fatalf("SSE 回放应含 user_message，实际:\n%s", body)
+	}
+}
+
+func TestAdminListContainers(t *testing.T) {
+	ts, st := setup(t)
+	_ = st.Users().Create(context.Background(), &store.User{ID: "admin1", Email: "admin@b.com", Role: store.RoleAdmin, QuotaTokens: 1})
+	adminToken, _ := auth.NewTokenManager("test-secret", time.Hour).Issue("admin1", string(store.RoleAdmin), time.Now())
+	resp, out := doJSON(t, http.MethodGet, ts.URL+"/api/admin/containers", adminToken, nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("管理员查看容器应 200, got %d", resp.StatusCode)
+	}
+	list, _ := out["containers"].([]any)
+	if len(list) != 1 {
+		t.Fatalf("应列出 1 个受控容器, got %v", out["containers"])
+	}
+	c0 := list[0].(map[string]any)
+	if c0["user"] != "u1" || c0["kind"] != "runner" {
+		t.Fatalf("容器信息不符: %v", c0)
 	}
 }
 

@@ -24,6 +24,9 @@ type Config struct {
 
 	ArtifactsDir string // 会话工件（截图等）落盘目录
 
+	ControlURL  string        // 会话容器回连控制平面的地址
+	IdleTimeout time.Duration // 空闲多久回收 runner 容器
+
 	DefaultQuotaTokens int64 // 新用户默认 token 配额（内部配额制，不接真实支付）
 
 	// 首个管理员账号引导：服务启动时若不存在则自动创建
@@ -41,10 +44,10 @@ type DeepSeekConfig struct {
 
 // SandboxConfig 描述会话运行环境。
 type SandboxConfig struct {
-	Mode       string // docker | local
-	DockerHost string // 默认 unix:///var/run/docker.sock
-	Image      string // 会话容器镜像（含 shell 等工具）
-	Network    string // 容器网络，默认 bridge；可设为 none 收紧出网
+	Mode        string // docker | local
+	DockerHost  string // 默认 unix:///var/run/docker.sock
+	RunnerImage string // 会话 runner 镜像（pi 运行时），默认 suki-runner:dev
+	Network     string // 容器网络，默认 bridge
 }
 
 // WorkspaceConfig 描述工作区存储模式。
@@ -73,10 +76,10 @@ func Load() Config {
 			ProModel:  env("SUKI_CHAT_DEEPSEEK_PRO_MODEL", "deepseek-v4-pro"),
 		},
 		Sandbox: SandboxConfig{
-			Mode:       env("SUKI_CHAT_SANDBOX_MODE", "docker"),
-			DockerHost: env("SUKI_CHAT_DOCKER_HOST", "unix:///var/run/docker.sock"),
-			Image:      env("SUKI_CHAT_SANDBOX_IMAGE", "alpine:3"),
-			Network:    env("SUKI_CHAT_SANDBOX_NETWORK", "bridge"),
+			Mode:        env("SUKI_CHAT_SANDBOX_MODE", "docker"),
+			DockerHost:  env("SUKI_CHAT_DOCKER_HOST", "unix:///var/run/docker.sock"),
+			RunnerImage: env("SUKI_CHAT_RUNNER_IMAGE", "suki-runner:dev"),
+			Network:     env("SUKI_CHAT_SANDBOX_NETWORK", "bridge"),
 		},
 		Workspace: WorkspaceConfig{
 			Mode:         env("SUKI_CHAT_WORKSPACE_MODE", "local"),
@@ -87,6 +90,8 @@ func Load() Config {
 			CDPURL: env("SUKI_CHAT_BROWSER_CDP", "http://127.0.0.1:9222"),
 		},
 		ArtifactsDir:       env("SUKI_CHAT_ARTIFACTS_DIR", filepath.Join(os.TempDir(), "suki-chat-artifacts")),
+		ControlURL:         env("SUKI_CHAT_CONTROL_URL", "http://host.docker.internal:8182"),
+		IdleTimeout:        envDuration("SUKI_CHAT_IDLE_TIMEOUT", 15*time.Minute),
 		DefaultQuotaTokens: envInt64("SUKI_CHAT_DEFAULT_QUOTA_TOKENS", 1_000_000),
 		AdminEmail:         env("SUKI_CHAT_ADMIN_EMAIL", "admin@example.com"),
 		AdminPassword:      env("SUKI_CHAT_ADMIN_PASSWORD", "admin12345"),

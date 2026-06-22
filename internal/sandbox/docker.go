@@ -85,23 +85,35 @@ func (p *DockerProvider) do(ctx context.Context, method, path string, body any) 
 }
 
 type containerCreateBody struct {
-	Image      string     `json:"Image"`
-	Cmd        []string   `json:"Cmd"`
-	Tty        bool       `json:"Tty"`
-	Env        []string   `json:"Env,omitempty"`
-	WorkingDir string     `json:"WorkingDir,omitempty"`
-	HostConfig hostConfig `json:"HostConfig"`
+	Image        string              `json:"Image"`
+	Cmd          []string            `json:"Cmd,omitempty"` // 留空则用镜像自带 CMD（runner 用）
+	Tty          bool                `json:"Tty"`
+	Env          []string            `json:"Env,omitempty"`
+	WorkingDir   string              `json:"WorkingDir,omitempty"`
+	Labels       map[string]string   `json:"Labels,omitempty"`
+	ExposedPorts map[string]struct{} `json:"ExposedPorts,omitempty"`
+	HostConfig   hostConfig          `json:"HostConfig"`
 }
 
 type hostConfig struct {
-	Binds       []string `json:"Binds,omitempty"`
-	NanoCPUs    int64    `json:"NanoCpus,omitempty"`
-	Memory      int64    `json:"Memory,omitempty"`
-	PidsLimit   int64    `json:"PidsLimit,omitempty"`
-	NetworkMode string   `json:"NetworkMode,omitempty"`
-	CapDrop     []string `json:"CapDrop,omitempty"`
-	SecurityOpt []string `json:"SecurityOpt,omitempty"`
+	Binds        []string                 `json:"Binds,omitempty"`
+	NanoCPUs     int64                    `json:"NanoCpus,omitempty"`
+	Memory       int64                    `json:"Memory,omitempty"`
+	PidsLimit    int64                    `json:"PidsLimit,omitempty"`
+	NetworkMode  string                   `json:"NetworkMode,omitempty"`
+	CapDrop      []string                 `json:"CapDrop,omitempty"`
+	SecurityOpt  []string                 `json:"SecurityOpt,omitempty"`
+	PortBindings map[string][]portBinding `json:"PortBindings,omitempty"`
 }
+
+type portBinding struct {
+	HostIp   string `json:"HostIp"`
+	HostPort string `json:"HostPort"`
+}
+
+// ManagedLabel 标记由控制平面创建的资源；所有 list/stop/reap 只作用于带此标签者，
+// 基础设施（如 Postgres）不带标签，控制平面绝不触碰。
+const ManagedLabel = "suki.managed"
 
 // Create 创建并启动一个会话容器。
 func (p *DockerProvider) Create(ctx context.Context, spec SandboxSpec) (Sandbox, error) {
@@ -128,6 +140,7 @@ func (p *DockerProvider) Create(ctx context.Context, spec SandboxSpec) (Sandbox,
 		Tty:        false,
 		Env:        env,
 		WorkingDir: target,
+		Labels:     map[string]string{ManagedLabel: "true", "suki.session": spec.SessionID, "suki.kind": "shell"},
 		HostConfig: hostConfig{
 			Binds:       binds,
 			NetworkMode: spec.Network,

@@ -64,6 +64,7 @@ func (s *Server) Router() *gin.Engine {
 			{
 				admin.GET("/users", s.handleAdminListUsers)
 				admin.GET("/sessions", s.handleAdminListSessions)
+				admin.GET("/containers", s.handleAdminListContainers)
 			}
 		}
 	}
