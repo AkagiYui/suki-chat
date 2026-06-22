@@ -13,14 +13,14 @@ import (
 
 // Server 持有控制平面依赖。
 type Server struct {
-	store    *store.MemoryStore
+	store    store.Store
 	tokens   *auth.TokenManager
 	sessions *session.Manager
 	cfg      config.Config
 }
 
 // New 创建 Server。
-func New(st *store.MemoryStore, tokens *auth.TokenManager, sessions *session.Manager, cfg config.Config) *Server {
+func New(st store.Store, tokens *auth.TokenManager, sessions *session.Manager, cfg config.Config) *Server {
 	return &Server{store: st, tokens: tokens, sessions: sessions, cfg: cfg}
 }
 

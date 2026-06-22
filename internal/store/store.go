@@ -69,6 +69,13 @@ type Event struct {
 	CreatedAt time.Time       `json:"createdAt"`
 }
 
+// Store 聚合三个仓储。MemoryStore 与 PostgresStore 都实现它，控制平面只依赖此接口。
+type Store interface {
+	Users() UserRepo
+	Sessions() SessionRepo
+	Events() EventStore
+}
+
 // UserRepo 是用户仓储。
 type UserRepo interface {
 	Create(ctx context.Context, u *User) error

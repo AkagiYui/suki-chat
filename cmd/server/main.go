@@ -20,7 +20,19 @@ func main() {
 	cfg := config.Load()
 	gin.SetMode(gin.ReleaseMode)
 
-	st := store.NewMemoryStore()
+	// 存储：设置 DSN 用 PostgreSQL（基础设施，独立运行；控制平面只作客户端连接），否则内存。
+	var st store.Store
+	if cfg.DatabaseDSN != "" {
+		pg, err := store.NewPostgresStore(context.Background(), cfg.DatabaseDSN)
+		if err != nil {
+			log.Fatalf("连接 PostgreSQL 失败: %v", err)
+		}
+		st = pg
+		log.Printf("→ 存储: PostgreSQL")
+	} else {
+		st = store.NewMemoryStore()
+		log.Printf("→ 存储: 内存（重启丢失；设置 SUKI_CHAT_DATABASE_DSN 以持久化）")
+	}
 	bootstrapAdmin(st, cfg)
 
 	// Docker 是会话 runner 容器的运行后端（必需）。
@@ -61,7 +73,7 @@ func main() {
 }
 
 // bootstrapAdmin 在首次启动时创建管理员账号（若不存在）。
-func bootstrapAdmin(st *store.MemoryStore, cfg config.Config) {
+func bootstrapAdmin(st store.Store, cfg config.Config) {
 	ctx := context.Background()
 	if _, err := st.Users().GetByEmail(ctx, cfg.AdminEmail); err == nil {
 		return

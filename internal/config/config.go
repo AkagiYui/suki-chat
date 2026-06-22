@@ -27,6 +27,10 @@ type Config struct {
 	ControlURL  string        // 会话容器回连控制平面的地址
 	IdleTimeout time.Duration // 空闲多久回收 runner 容器
 
+	// 持久化：设置后用 PostgreSQL（属基础设施，控制平面只作客户端连接，不创建/管理该容器）；
+	// 留空则用内存存储（重启丢失）。
+	DatabaseDSN string
+
 	DefaultQuotaTokens int64 // 新用户默认 token 配额（内部配额制，不接真实支付）
 
 	// 首个管理员账号引导：服务启动时若不存在则自动创建
@@ -94,6 +98,7 @@ func Load() Config {
 		ArtifactsDir:       env("SUKI_CHAT_ARTIFACTS_DIR", filepath.Join(os.TempDir(), "suki-chat-artifacts")),
 		ControlURL:         env("SUKI_CHAT_CONTROL_URL", "http://host.docker.internal:8182"),
 		IdleTimeout:        envDuration("SUKI_CHAT_IDLE_TIMEOUT", 15*time.Minute),
+		DatabaseDSN:        os.Getenv("SUKI_CHAT_DATABASE_DSN"),
 		DefaultQuotaTokens: envInt64("SUKI_CHAT_DEFAULT_QUOTA_TOKENS", 1_000_000),
 		AdminEmail:         env("SUKI_CHAT_ADMIN_EMAIL", "admin@example.com"),
 		AdminPassword:      env("SUKI_CHAT_ADMIN_PASSWORD", "admin12345"),

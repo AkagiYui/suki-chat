@@ -95,7 +95,7 @@ type browserHandle struct {
 }
 
 // NewManager 创建会话管理器。
-func NewManager(s *store.MemoryStore, runner RunnerBackend, ws workspace.Store, tokens TokenIssuer, cfg Config) *Manager {
+func NewManager(s store.Store, runner RunnerBackend, ws workspace.Store, tokens TokenIssuer, cfg Config) *Manager {
 	if cfg.IdleTimeout <= 0 {
 		cfg.IdleTimeout = 15 * time.Minute
 	}
