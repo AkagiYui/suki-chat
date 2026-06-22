@@ -112,6 +112,47 @@ func usageFromLine(line []byte) int {
 	return 0
 }
 
+// handleInternalBrowser 为会话按需提供浏览器 CDP 地址（默认每用户共享，独立会话单独起）。
+func (s *Server) handleInternalBrowser(c *gin.Context) {
+	sid := c.GetString(ctxSessionID)
+	if c.Param("id") != sid {
+		c.JSON(http.StatusForbidden, gin.H{"error": "会话不匹配"})
+		return
+	}
+	sess, err := s.store.Sessions().GetByID(c.Request.Context(), sid)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "会话不存在"})
+		return
+	}
+	cdp, err := s.sessions.EnsureBrowser(c.Request.Context(), sess)
+	if err != nil {
+		serverError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"cdpUrl": cdp})
+}
+
+// handleInternalArtifact 接收会话容器上传的工件（如截图 PNG），保存并返回可访问 URL。
+func (s *Server) handleInternalArtifact(c *gin.Context) {
+	sid := c.GetString(ctxSessionID)
+	if c.Param("id") != sid {
+		c.JSON(http.StatusForbidden, gin.H{"error": "会话不匹配"})
+		return
+	}
+	name := c.Query("name")
+	if !artifactNameRe.MatchString(name) {
+		badRequest(c, "非法文件名")
+		return
+	}
+	data, _ := io.ReadAll(io.LimitReader(c.Request.Body, 16<<20))
+	url, err := s.sessions.SaveArtifact(sid, name, data)
+	if err != nil {
+		serverError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"url": url})
+}
+
 // handleInternalEvents 接收会话容器上报的事件，写入事件日志（→ SSE 扇出/回放）。
 func (s *Server) handleInternalEvents(c *gin.Context) {
 	if c.Param("id") != c.GetString(ctxSessionID) {

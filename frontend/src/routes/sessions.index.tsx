@@ -37,6 +37,7 @@ function SessionsPage() {
   const [models] = createResource(() => api.models().then((r) => r.models))
   const [title, setTitle] = createSignal("")
   const [model, setModel] = createSignal("")
+  const [indep, setIndep] = createSignal(false)
   const [creating, setCreating] = createSignal(false)
 
   createEffect(() => {
@@ -48,7 +49,7 @@ function SessionsPage() {
     e.preventDefault()
     setCreating(true)
     try {
-      const r = await api.createSession(title() || "新会话", model())
+      const r = await api.createSession(title() || "新会话", model(), indep())
       navigate({ to: "/sessions/$sessionId", params: { sessionId: r.session.id } })
     } finally {
       setCreating(false)
@@ -93,6 +94,11 @@ function SessionsPage() {
             新建
           </button>
         </div>
+        <label class="mt-3 flex items-center gap-2 text-sm text-gray-600">
+          <input type="checkbox" checked={indep()} onChange={(e) => setIndep(e.currentTarget.checked)} class="size-4" />
+          <Icon icon="lucide:globe-lock" class="size-4 text-gray-400" />
+          使用独立浏览器（默认与你的其他会话共享一个浏览器）
+        </label>
       </form>
 
       <Show

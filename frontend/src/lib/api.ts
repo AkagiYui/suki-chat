@@ -74,8 +74,8 @@ export const api = {
   listSessions() {
     return request<{ sessions: Session[] }>("GET", "/api/sessions")
   },
-  createSession(title: string, model: string) {
-    return request<{ session: Session }>("POST", "/api/sessions", { title, model })
+  createSession(title: string, model: string, independentBrowser = false) {
+    return request<{ session: Session }>("POST", "/api/sessions", { title, model, independentBrowser })
   },
   getSession(id: string) {
     return request<{ session: Session }>("GET", `/api/sessions/${id}`)

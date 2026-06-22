@@ -52,12 +52,13 @@ type TokenIssuer interface {
 // Config 是会话管理器配置。
 type Config struct {
 	RunnerImage  string        // 会话 runner 镜像
+	BrowserImage string        // 浏览器镜像（CloakBrowser）
 	ControlURL   string        // 容器回连控制平面的地址（如 http://host.docker.internal:8182）
 	CPUs         float64       // 单 runner CPU 上限
 	MemoryMB     int64         // 单 runner 内存上限
 	PidsLimit    int64         // 单 runner 进程数上限
-	Network      string        // runner 网络
-	IdleTimeout  time.Duration // 空闲多久回收 runner 容器
+	Network      string        // 容器网络（suki-net，runner 与浏览器同网）
+	IdleTimeout  time.Duration // 空闲多久回收容器
 	ArtifactsDir string        // 会话工件目录（截图等）
 }
 
@@ -74,6 +75,9 @@ type Manager struct {
 
 	mu      sync.Mutex
 	runtime map[string]*sessionRuntime
+
+	browserMu sync.Mutex
+	browsers  map[string]*browserHandle // 浏览器容器：key=user-<uid> 或 sess-<sid>
 }
 
 type sessionRuntime struct {
@@ -82,6 +86,11 @@ type sessionRuntime struct {
 	runnerUp     bool
 	runnerName   string
 	hostPort     int
+	lastActivity time.Time
+}
+
+type browserHandle struct {
+	name         string
 	lastActivity time.Time
 }
 
@@ -100,7 +109,49 @@ func NewManager(s *store.MemoryStore, runner RunnerBackend, ws workspace.Store, 
 		cfg:      cfg,
 		http:     &http.Client{Timeout: 15 * time.Minute}, // agent 一轮可能较久
 		runtime:  make(map[string]*sessionRuntime),
+		browsers: make(map[string]*browserHandle),
 	}
+}
+
+// EnsureBrowser 确保该会话可用的浏览器容器在运行，返回其 CDP 地址（容器名:9222）。
+// 默认每用户共享一个浏览器；会话勾选独立浏览器时为该会话单独起一个。
+// runner 在需要截图时按需调用（经内部接口），故浏览器是懒启动。
+func (m *Manager) EnsureBrowser(ctx context.Context, sess *store.Session) (string, error) {
+	key := "user-" + sess.UserID
+	labelKey, labelVal := "suki.user", sess.UserID
+	if sess.IndependentBrowser {
+		key = "sess-" + sess.ID
+		labelKey, labelVal = "suki.session", sess.ID
+	}
+	name := "suki-browser-" + key
+	cdp := "http://" + name + ":9222"
+
+	m.browserMu.Lock()
+	defer m.browserMu.Unlock()
+	if h := m.browsers[key]; h != nil {
+		h.lastActivity = time.Now()
+		return cdp, nil
+	}
+	_, _, err := m.runner.RunService(ctx, sandbox.ServiceSpec{
+		Name:      name,
+		Image:     m.cfg.BrowserImage,
+		Cmd:       []string{"cloakserve"},
+		Port:      9222,
+		Publish:   false, // 走容器网络，runner 按名直连，不暴露主机端口
+		Hardened:  false, // Chromium 需要 capability
+		Resources: sandbox.ResourceLimits{MemoryMB: 1024, PidsLimit: 1024},
+		Network:   m.cfg.Network,
+		Labels: map[string]string{
+			sandbox.ManagedLabel: "true",
+			labelKey:             labelVal,
+			"suki.kind":          "browser",
+		},
+	})
+	if err != nil {
+		return "", err
+	}
+	m.browsers[key] = &browserHandle{name: name, lastActivity: time.Now()}
+	return cdp, nil
 }
 
 func (m *Manager) runtimeFor(sessionID string) *sessionRuntime {
@@ -218,19 +269,20 @@ func (m *Manager) ensureRunner(ctx context.Context, sessionID, userID, modelID s
 
 	name := "suki-runner-" + sessionID
 	_, hostPort, err := m.runner.RunService(ctx, sandbox.ServiceSpec{
-		Name:  name,
-		Image: m.cfg.RunnerImage,
-		Port:  runnerPort,
+		Name:     name,
+		Image:    m.cfg.RunnerImage,
+		Port:     runnerPort,
+		Publish:  true, // 控制平面经 127.0.0.1:<hostPort> 投递消息
+		Hardened: true,
 		Env: map[string]string{
 			"SUKI_CONTROL_URL":  m.cfg.ControlURL,
 			"SUKI_RUNNER_TOKEN": token,
 			"SUKI_SESSION_ID":   sessionID,
 			"SUKI_MODEL":        modelID,
-			"SUKI_BROWSER_CDP":  "", // 浏览器在后续阶段接入
 		},
 		Mount:     mount,
 		Resources: sandbox.ResourceLimits{CPUs: m.cfg.CPUs, MemoryMB: m.cfg.MemoryMB, PidsLimit: m.cfg.PidsLimit},
-		Network:   m.cfg.Network,
+		Network:   m.cfg.Network, // suki-net：可按名直连浏览器容器
 		Labels: map[string]string{
 			sandbox.ManagedLabel: "true",
 			"suki.session":       sessionID,
@@ -358,6 +410,17 @@ func (m *Manager) ReapIdle(ctx context.Context) int {
 			_ = m.setStatus(ctx, id, store.SessionHibernated)
 		}
 	}
+
+	// 回收空闲的浏览器容器。
+	m.browserMu.Lock()
+	for key, h := range m.browsers {
+		if time.Since(h.lastActivity) > m.cfg.IdleTimeout {
+			_ = m.runner.RemoveContainer(ctx, h.name)
+			delete(m.browsers, key)
+			reaped++
+		}
+	}
+	m.browserMu.Unlock()
 	return reaped
 }
 
@@ -404,8 +467,8 @@ func (m *Manager) setStatus(ctx context.Context, sessionID string, status store.
 	return m.sessions.Update(ctx, s)
 }
 
-// saveArtifact 把会话工件（如截图）写入 <ArtifactsDir>/<sessionID>/<name>，返回 API 路径。
-func (m *Manager) saveArtifact(sessionID, name string, data []byte) (string, error) {
+// SaveArtifact 把会话工件（如截图）写入 <ArtifactsDir>/<sessionID>/<name>，返回 API 路径。
+func (m *Manager) SaveArtifact(sessionID, name string, data []byte) (string, error) {
 	dir := filepath.Join(m.cfg.ArtifactsDir, sessionID)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", err

@@ -3,17 +3,20 @@ package sandbox
 import (
 	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"strconv"
 )
 
-// ServiceSpec 描述一个"服务型"容器（用镜像自带 CMD 常驻、对外发布一个端口），
-// 用于会话 runner 与浏览器容器。
+// ServiceSpec 描述一个"服务型"容器（用镜像 CMD 常驻），用于会话 runner 与浏览器容器。
 type ServiceSpec struct {
 	Name      string
 	Image     string
-	Port      int // 容器内服务端口（会被发布到 127.0.0.1 的随机主机端口）
+	Cmd       []string // 留空用镜像自带 CMD
+	Port      int      // 服务端口
+	Publish   bool     // 是否把 Port 发布到 127.0.0.1（runner=true；浏览器走容器网络=false）
+	Hardened  bool     // 是否 drop 所有 capability（runner=true；浏览器需要 caps=false）
 	Env       map[string]string
 	Mount     MountRef
 	Resources ResourceLimits
@@ -30,7 +33,22 @@ type ManagedContainer struct {
 	CreatedUnix int64
 }
 
-// RunService 创建并启动一个服务型容器，返回容器 ID 与分配到的主机端口。
+// EnsureNetwork 创建一个用户自定义 bridge 网络（已存在则幂等成功）。
+// runner 与浏览器容器同在此网络，runner 可按容器名直连浏览器，无需暴露主机端口。
+func (p *DockerProvider) EnsureNetwork(ctx context.Context, name string) error {
+	resp, err := p.do(ctx, http.MethodPost, "/networks/create", map[string]any{
+		"Name": name, "Driver": "bridge",
+		"Labels": map[string]string{ManagedLabel: "true", "suki.kind": "network"},
+	})
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	io.Copy(io.Discard, resp.Body) // 201=创建；403/409=已存在，均视为成功
+	return nil
+}
+
+// RunService 创建并启动一个服务型容器；Publish 时返回分配到的主机端口。
 func (p *DockerProvider) RunService(ctx context.Context, spec ServiceSpec) (id string, hostPort int, err error) {
 	env := make([]string, 0, len(spec.Env))
 	for k, v := range spec.Env {
@@ -42,20 +60,20 @@ func (p *DockerProvider) RunService(ctx context.Context, spec ServiceSpec) (id s
 	} else if spec.Mount.HostPath != "" {
 		binds = []string{spec.Mount.HostPath + ":" + mountTargetOr(spec.Mount.Target)}
 	}
-	portKey := strconv.Itoa(spec.Port) + "/tcp"
 
 	body := containerCreateBody{
-		Image:        spec.Image,
-		Env:          env,
-		Labels:       spec.Labels,
-		ExposedPorts: map[string]struct{}{portKey: {}},
+		Image:  spec.Image,
+		Cmd:    spec.Cmd,
+		Env:    env,
+		Labels: spec.Labels,
 		HostConfig: hostConfig{
-			Binds:        binds,
-			NetworkMode:  spec.Network,
-			CapDrop:      []string{"ALL"},
-			SecurityOpt:  []string{"no-new-privileges"},
-			PortBindings: map[string][]portBinding{portKey: {{HostIp: "127.0.0.1", HostPort: ""}}},
+			Binds:       binds,
+			NetworkMode: spec.Network,
+			SecurityOpt: []string{"no-new-privileges"},
 		},
+	}
+	if spec.Hardened {
+		body.HostConfig.CapDrop = []string{"ALL"}
 	}
 	if spec.Resources.CPUs > 0 {
 		body.HostConfig.NanoCPUs = int64(spec.Resources.CPUs * 1e9)
@@ -66,6 +84,11 @@ func (p *DockerProvider) RunService(ctx context.Context, spec ServiceSpec) (id s
 	if spec.Resources.PidsLimit > 0 {
 		body.HostConfig.PidsLimit = spec.Resources.PidsLimit
 	}
+	portKey := strconv.Itoa(spec.Port) + "/tcp"
+	if spec.Publish {
+		body.ExposedPorts = map[string]struct{}{portKey: {}}
+		body.HostConfig.PortBindings = map[string][]portBinding{portKey: {{HostIp: "127.0.0.1", HostPort: ""}}}
+	}
 
 	id, err = p.createContainer(ctx, spec.Name, body)
 	if err != nil {
@@ -75,9 +98,11 @@ func (p *DockerProvider) RunService(ctx context.Context, spec ServiceSpec) (id s
 		_ = p.removeContainer(ctx, id)
 		return "", 0, err
 	}
-	hostPort, err = p.inspectHostPort(ctx, id, portKey)
-	if err != nil {
-		return "", 0, err
+	if spec.Publish {
+		hostPort, err = p.inspectHostPort(ctx, id, portKey)
+		if err != nil {
+			return "", 0, err
+		}
 	}
 	return id, hostPort, nil
 }

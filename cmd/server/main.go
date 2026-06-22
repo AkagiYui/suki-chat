@@ -28,6 +28,10 @@ func main() {
 	if !dp.Healthy(context.Background()) {
 		log.Printf("⚠ Docker 不可用（%s）——会话将无法启动。请检查 docker。", cfg.Sandbox.DockerHost)
 	}
+	// runner 与浏览器容器同处此私有网络，runner 可按容器名直连浏览器。
+	if err := dp.EnsureNetwork(context.Background(), cfg.Sandbox.Network); err != nil {
+		log.Printf("⚠ 创建网络 %s 失败: %v", cfg.Sandbox.Network, err)
+	}
 	ws := workspace.NewLocalVolumeStore(dp, cfg.Workspace.VolumePrefix)
 	tokens := auth.NewTokenManager(cfg.JWTSecret, cfg.JWTTTL)
 
@@ -37,6 +41,7 @@ func main() {
 
 	mgr := session.NewManager(st, dp, ws, tokens, session.Config{
 		RunnerImage:  cfg.Sandbox.RunnerImage,
+		BrowserImage: cfg.Sandbox.BrowserImage,
 		ControlURL:   cfg.ControlURL,
 		CPUs:         1.0,
 		MemoryMB:     1024,

@@ -12,6 +12,7 @@ import process from "node:process"
 
 import { AuthStorage, createAgentSession, ModelRegistry, SessionManager } from "@earendil-works/pi-coding-agent"
 import { streamSimple, Type } from "@earendil-works/pi-ai"
+import { chromium } from "playwright-core"
 
 const CONTROL_URL = (process.env.SUKI_CONTROL_URL || "").replace(/\/$/, "")
 const RUNNER_TOKEN = process.env.SUKI_RUNNER_TOKEN || ""
@@ -66,6 +67,75 @@ const webFetchTool = {
   },
 }
 
+// 懒获取本会话可用的浏览器 CDP 地址（控制平面据"独立/共享"决定起哪个浏览器容器）。
+let browserCdp
+async function getBrowserCdp() {
+  if (browserCdp) return browserCdp
+  const r = await fetch(`${CONTROL_URL}/api/internal/sessions/${SESSION_ID}/browser`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${RUNNER_TOKEN}` },
+  })
+  if (!r.ok) throw new Error(`获取浏览器失败: HTTP ${r.status}`)
+  browserCdp = (await r.json()).cdpUrl
+  return browserCdp
+}
+
+async function uploadArtifact(name, buf) {
+  const r = await fetch(`${CONTROL_URL}/api/internal/sessions/${SESSION_ID}/artifacts?name=${encodeURIComponent(name)}`, {
+    method: "POST",
+    headers: { "Content-Type": "image/png", Authorization: `Bearer ${RUNNER_TOKEN}` },
+    body: buf,
+  })
+  if (!r.ok) throw new Error(`上传截图失败: HTTP ${r.status}`)
+  return (await r.json()).url
+}
+
+// 等待浏览器 CDP 就绪（CloakBrowser 冷启动需初始化，首次可达数十秒）。
+async function waitBrowserReady(cdp) {
+  const deadline = Date.now() + 80000
+  while (Date.now() < deadline) {
+    try {
+      const ac = new AbortController()
+      const t = setTimeout(() => ac.abort(), 3000)
+      const r = await fetch(cdp + "/json/version", { signal: ac.signal })
+      clearTimeout(t)
+      if (r.ok) return
+    } catch {
+      // 还没起来，稍后重试
+    }
+    await new Promise((res) => setTimeout(res, 1500))
+  }
+  throw new Error("浏览器未在限定时间内就绪")
+}
+
+// screenshot_page：在隐身浏览器中打开网页并整页截图，上传后以图片展示给用户。
+const screenshotTool = {
+  name: "screenshot_page",
+  label: "Screenshot",
+  description: "在真实的隐身浏览器中打开网页并整页截图，截图会直接展示给用户。" +
+    "当用户要求“截图 / 看看页面长什么样 / 访问某网站并展示”时使用。",
+  parameters: Type.Object({ url: Type.String({ description: "要打开并截图的完整 URL（含 http/https）" }) }),
+  execute: async (_id, params) => {
+    const cdp = await getBrowserCdp()
+    await waitBrowserReady(cdp)
+    const browser = await chromium.connectOverCDP(cdp)
+    try {
+      const context = await browser.newContext() // 每次独立上下文，用完即弃
+      const page = await context.newPage()
+      await page.goto(params.url, { waitUntil: "load", timeout: 45000 })
+      await page.waitForTimeout(2000)
+      const title = await page.title()
+      const buf = await page.screenshot({ fullPage: true, type: "png" })
+      await context.close()
+      const url = await uploadArtifact(`shot-${Date.now()}.png`, buf)
+      emit("screenshot", { url, pageUrl: params.url, title })
+      return { content: [{ type: "text", text: `已在隐身浏览器中打开并整页截图（标题：${title}），已展示给用户。` }], details: {} }
+    } finally {
+      await browser.close()
+    }
+  },
+}
+
 let sessionPromise
 async function getSession() {
   if (!sessionPromise) {
@@ -82,7 +152,7 @@ async function getSession() {
         model,
         authStorage,
         modelRegistry,
-        customTools: [webFetchTool],
+        customTools: [webFetchTool, screenshotTool],
         sessionManager: SessionManager.inMemory(),
       })
       // 直接注入 runner 令牌作为 apiKey：自定义 provider "suki" 未在注册表登记，

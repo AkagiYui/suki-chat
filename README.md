@@ -36,19 +36,29 @@ SolidJS 前端 ── Caddy ── Go 控制平面 ──(Sandbox 接口)── 
 
 ### 与目标架构的差异（MVP 取舍，已在代码注释标注）
 
-- Agent 运行时：目标是 **pi（TypeScript）跑在容器内**；v1 先用 **Go 版 agent 循环**跑在控制平面，
-  工具的 `run_shell` 在隔离容器内执行。`agent` 接口与事件协议已为切换 pi 运行时预留。
-- 持久化：v1 用内存存储（仓储接口化，重启丢状态）；下一步接 PostgreSQL。
-- 浏览器工具：v1 提供 `web_fetch`（HTTP+正文抽取）；后续接入每会话独立的 CloakBrowser。
+- **Agent 运行时跑在每会话容器内（pi）**：控制平面只编排——按会话起一个 `suki-runner`（Node+pi）
+  容器，转发用户消息、收集容器上报的事件。模型经控制平面计量代理调用（容器不持密钥、不直连上游）。
+  bash / web_fetch / 截图工具都在容器内执行。
+- **浏览器**：默认每用户共享一个 CloakBrowser 容器；创建会话时勾选「独立浏览器」则该会话单独一个。
+  runner 与浏览器同处私有网络 `suki-net`，按容器名直连。
+- **容器治理**：控制平面只管理自己创建的容器（`suki.managed` 标签）；空闲自动回收；管理员可查看
+  各用户活跃容器。基础设施（如 Postgres）不带标签，绝不被触碰。
+- 持久化：当前仍是内存存储（重启丢状态）；接 PostgreSQL 是下一步。
 
 ## 本地运行
+
+需要本机可用的 Docker。先准备两个会话容器镜像：
+
+```bash
+docker build -t suki-runner:dev ./runner        # 会话 runner（pi 运行时）
+docker pull cloakhq/cloakbrowser:latest         # 浏览器（截图用，约 2.4GB）
+```
 
 ### 后端
 
 ```bash
-# 需要本机可用的 Docker（用于会话隔离容器；无 Docker 会自动回退到 local 沙箱）
 export DEEPSEEK_API_KEY=sk-xxxx          # DeepSeek 密钥（仅本地，勿提交）
-go run ./cmd/server                       # 监听 :8182
+go run ./cmd/server                       # 监听 :8182；启动时自动创建 suki-net 网络
 ```
 
 默认会创建管理员账号 `admin@example.com` / `admin12345`（可用环境变量覆盖）。
@@ -78,9 +88,11 @@ docker run -p 80:80 -e DEEPSEEK_API_KEY=sk-xxxx \
 | `SUKI_CHAT_DEEPSEEK_API_KEY` / `DEEPSEEK_API_KEY` | 空 | DeepSeek 密钥 |
 | `SUKI_CHAT_DEEPSEEK_FAST_MODEL` | `deepseek-v4-flash` | 轻量模型 |
 | `SUKI_CHAT_DEEPSEEK_PRO_MODEL` | `deepseek-v4-pro` | 强力模型 |
-| `SUKI_CHAT_SANDBOX_MODE` | `docker` | `docker` / `local` |
-| `SUKI_CHAT_SANDBOX_IMAGE` | `alpine:3` | 会话容器镜像 |
-| `SUKI_CHAT_SANDBOX_NETWORK` | `bridge` | 容器网络（可设 `none` 收紧出网） |
+| `SUKI_CHAT_RUNNER_IMAGE` | `suki-runner:dev` | 会话 runner 镜像（pi 运行时） |
+| `SUKI_CHAT_BROWSER_IMAGE` | `cloakhq/cloakbrowser:latest` | 浏览器镜像（截图） |
+| `SUKI_CHAT_SANDBOX_NETWORK` | `suki-net` | runner 与浏览器同处的私有网络 |
+| `SUKI_CHAT_CONTROL_URL` | `http://host.docker.internal:8182` | 容器回连控制平面地址 |
+| `SUKI_CHAT_IDLE_TIMEOUT` | `15m` | 空闲多久回收容器 |
 | `SUKI_CHAT_DEFAULT_QUOTA_TOKENS` | `1000000` | 新用户默认 token 配额 |
 | `SUKI_CHAT_ADMIN_EMAIL` / `_PASSWORD` | 见上 | 引导管理员账号 |
 
